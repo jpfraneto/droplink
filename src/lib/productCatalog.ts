@@ -1,14 +1,17 @@
-export const productCatalog = {
-  "t-shirt": 4400,
-  hoodie: 6800,
-  poster: 2800,
-  cap: 3200,
-  tote: 2600,
-  "sticker pack": 1200,
-  mug: 2200
-} as const;
-
-export const defaultProductMix = ["t-shirt", "hoodie", "poster"] as const;
+export type ProductFamily =
+  | "premium tee"
+  | "heavyweight hoodie"
+  | "windbreaker"
+  | "laptop sleeve"
+  | "tote bag"
+  | "notebook"
+  | "mug"
+  | "poster"
+  | "framed poster"
+  | "canvas"
+  | "hat"
+  | "sticker"
+  | "other";
 
 export function formatMoney(cents: number, currency = "usd"): string {
   return new Intl.NumberFormat("en-US", {

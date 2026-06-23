@@ -1,4 +1,4 @@
-import type { Drop } from "./types";
+import type { Brand } from "./types";
 
 function hash(input: string): number {
   let value = 0;
@@ -6,8 +6,8 @@ function hash(input: string): number {
   return value;
 }
 
-export function themeFromDrop(drop: Drop) {
-  const hue = hash(`${drop.sourceDomain}:${drop.brandName}`);
+export function themeFromBrand(brand: Brand) {
+  const hue = hash(`${brand.hostname}:${brand.name}`);
   return {
     primary: `hsl(${hue} 82% 62%)`,
     secondary: `hsl(${(hue + 42) % 360} 90% 68%)`,

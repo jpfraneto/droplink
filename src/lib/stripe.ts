@@ -1,10 +1,10 @@
 import Stripe from "stripe";
-import { newId } from "./hashes";
-import { saveOrder } from "./store";
-import type { Drop, Order, Product } from "./types";
+import { loggedExternalCall } from "./logger";
+import { attachStripeSession, completeCheckoutSale, releaseCheckout, reserveEditionForRelic } from "./store";
+import type { Relic } from "./types";
 
-export function platformFeeCents(amountCents: number, platformFeeBps: number): number {
-  return Math.round((amountCents * platformFeeBps) / 10000);
+export function commissionCents(amountCents: number, commissionBps: number): number {
+  return Math.round((amountCents * commissionBps) / 10000);
 }
 
 export function stripeClient(): Stripe | null {
@@ -15,85 +15,102 @@ export function stripeClient(): Stripe | null {
   });
 }
 
-export async function createCheckoutSession(drop: Drop, product: Product): Promise<{ url: string; order: Order }> {
-  const now = new Date().toISOString();
-  const fee = platformFeeCents(product.priceCents, drop.platformFeeBps);
+function appUrl(): string {
+  return (process.env.DROPLINK_PUBLIC_BASE_URL || process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000").replace(
+    /\/$/,
+    ""
+  );
+}
+
+export async function createRelicCheckoutSession(input: {
+  relicId: string;
+  baseUrl?: string;
+  requestId?: string | null;
+  traceId?: string | null;
+}): Promise<{ url: string; checkoutId: string; editionNumber: number }> {
+  const reserved = await reserveEditionForRelic(input);
+  const relic = reserved.bundle.relics.find((entry) => entry.id === input.relicId) as Relic | undefined;
+  if (!relic) throw new Error("Relic not found after reservation.");
   const stripe = stripeClient();
-  const appUrl = (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000").replace(/\/$/, "");
+  const fee = commissionCents(relic.priceCents, reserved.bundle.storefront.commissionBps);
+  const baseUrl = (input.baseUrl || appUrl()).replace(/\/$/, "");
 
   if (!stripe) {
-    const order: Order = {
-      id: newId("ord"),
-      dropId: drop.id,
-      productId: product.id,
-      stripeCheckoutSessionId: `mock_${newId("checkout")}`,
-      stripePaymentIntentId: null,
-      amountSubtotalCents: product.priceCents,
-      amountTotalCents: product.priceCents,
-      platformFeeCents: fee,
-      currency: product.currency,
-      status: "paid",
-      customerEmail: "mock-buyer@droplink.local",
-      fulfillmentStatus: "pending",
-      createdAt: now,
-      updatedAt: now
+    if (process.env.NODE_ENV === "production" && process.env.ALLOW_MOCKS !== "true") {
+      await releaseCheckout(reserved.checkout.id);
+      throw new Error("STRIPE_SECRET_KEY is required for checkout.");
+    }
+    const mockSessionId = `mock_${reserved.checkout.id}`;
+    await attachStripeSession(reserved.checkout.id, mockSessionId);
+    await completeCheckoutSale({
+      stripeSessionId: mockSessionId,
+      stripePaymentIntentId: `mock_pi_${reserved.checkout.id}`,
+      customerEmail: "mock-buyer@droplink.local"
+    });
+    return {
+      url: `${baseUrl}/${reserved.bundle.storefront.slug}?success=mock&session_id=${mockSessionId}`,
+      checkoutId: reserved.checkout.id,
+      editionNumber: reserved.edition.editionNumber
     };
-    await saveOrder(order);
-    return { url: `${appUrl}/d/${drop.slug}?success=mock&order=${order.id}`, order };
   }
 
-  const session = await stripe.checkout.sessions.create({
-    mode: "payment",
-    success_url: `${appUrl}/d/${drop.slug}?success=1&session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${appUrl}/d/${drop.slug}?cancelled=1`,
-    line_items: [
+  try {
+    const session = await loggedExternalCall(
       {
-        quantity: 1,
-        price_data: {
-          currency: product.currency,
-          unit_amount: product.priceCents,
-          product_data: {
-            name: product.name,
-            description: product.description,
-            images: [product.mockupUrl]
-          }
+        provider: "stripe",
+        operation: "checkout.sessions.create",
+        requestId: input.requestId,
+        traceId: input.traceId,
+        metadata: {
+          storefrontId: reserved.bundle.storefront.id,
+          collectionId: reserved.checkout.collectionId,
+          relicId: relic.id,
+          relicEditionId: reserved.edition.id
         }
-      }
-    ],
-    metadata: {
-      dropId: drop.id,
-      productId: product.id,
-      platformFeeBps: String(drop.platformFeeBps),
-      platformFeeCents: String(fee)
-    },
-    payment_intent_data: drop.stripeConnectedAccountId
-      ? {
-          application_fee_amount: fee,
-          transfer_data: {
-            destination: drop.stripeConnectedAccountId
-          }
-        }
-      : undefined
-  });
-
-  const order: Order = {
-    id: newId("ord"),
-    dropId: drop.id,
-    productId: product.id,
-    stripeCheckoutSessionId: session.id,
-    stripePaymentIntentId: typeof session.payment_intent === "string" ? session.payment_intent : null,
-    amountSubtotalCents: product.priceCents,
-    amountTotalCents: product.priceCents,
-    platformFeeCents: fee,
-    currency: product.currency,
-    status: "pending",
-    customerEmail: session.customer_details?.email || null,
-    fulfillmentStatus: "pending",
-    createdAt: now,
-    updatedAt: now
-  };
-  await saveOrder(order);
-
-  if (!session.url) throw new Error("Stripe did not return a checkout URL.");
-  return { url: session.url, order };
+      },
+      () =>
+        stripe.checkout.sessions.create({
+          mode: "payment",
+          success_url: `${baseUrl}/${reserved.bundle.storefront.slug}?success=1&session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${baseUrl}/${reserved.bundle.storefront.slug}?cancelled=1`,
+          expires_at: Math.floor(new Date(reserved.checkout.expiresAt).getTime() / 1000),
+          shipping_address_collection: { allowed_countries: ["US"] },
+          line_items: [
+            {
+              quantity: 1,
+              price_data: {
+                currency: relic.currency,
+                unit_amount: relic.priceCents,
+                product_data: {
+                  name: relic.name,
+                  description: relic.description,
+                  images: [reserved.bundle.mockups.find((entry) => entry.relicId === relic.id)?.imageUrl || ""].filter(Boolean)
+                }
+              }
+            }
+          ],
+          metadata: {
+            storefront_id: reserved.bundle.storefront.id,
+            collection_id: reserved.checkout.collectionId,
+            relic_id: relic.id,
+            relic_edition_id: reserved.edition.id,
+            checkout_session_id: reserved.checkout.id
+          },
+          payment_intent_data: reserved.bundle.storefront.stripeConnectedAccountId
+            ? {
+                application_fee_amount: fee,
+                transfer_data: {
+                  destination: reserved.bundle.storefront.stripeConnectedAccountId
+                }
+              }
+            : undefined
+        })
+    );
+    await attachStripeSession(reserved.checkout.id, session.id);
+    if (!session.url) throw new Error("Stripe did not return a checkout URL.");
+    return { url: session.url, checkoutId: reserved.checkout.id, editionNumber: reserved.edition.editionNumber };
+  } catch (error) {
+    await releaseCheckout(reserved.checkout.id);
+    throw error;
+  }
 }

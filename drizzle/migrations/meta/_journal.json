@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1782142573366,
+      "tag": "0000_wakeful_paladin",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1782156200000,
+      "tag": "0001_dynamic_printful_fulfillment",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1782230000000,
+      "tag": "0002_move_assets_to_r2",
+      "breakpoints": true
+    }
+  ]
+}

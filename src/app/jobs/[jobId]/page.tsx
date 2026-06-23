@@ -1,21 +1,13 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getDropById, getJob } from "@/lib/store";
+import { getGenerationJob, getStorefrontBundleById } from "@/lib/store";
 
-const stages = [
-  "reading the link...",
-  "extracting the brand...",
-  "finding the lore...",
-  "choosing 3 products...",
-  "generating mockups...",
-  "building the storefront...",
-  "creating the share image..."
-];
+export const dynamic = "force-dynamic";
 
 export default async function JobPage({ params }: { params: { jobId: string } }) {
-  const job = await getJob(params.jobId);
+  const job = await getGenerationJob(params.jobId);
   if (!job) notFound();
-  const drop = job.dropId ? await getDropById(job.dropId) : null;
+  const bundle = job.storefrontId ? await getStorefrontBundleById(job.storefrontId) : null;
 
   return (
     <main>
@@ -27,24 +19,16 @@ export default async function JobPage({ params }: { params: { jobId: string } })
           <span className="badge">{job.status}</span>
         </header>
         <section className="hero">
-          <h1>building the drop.</h1>
-          <p>Generation can run synchronously for the MVP, but the receipt still keeps the job trail.</p>
-          <div className="status-list">
-            {stages.map((stage) => (
-              <div className="status-item" key={stage}>
-                <span>{stage}</span>
-                <strong>{job.status === "failed" ? "stopped" : "done"}</strong>
-              </div>
-            ))}
-          </div>
+          <h1>{job.currentStep}</h1>
+          <p>Generation status is persisted. Use admin review for logs, checklist, relic plan, and publishing.</p>
           {job.error ? <p className="error">{job.error}</p> : null}
-          {drop ? (
-            <Link className="btn accent" href={`/d/${drop.slug}`}>
-              open storefront
+          {bundle ? (
+            <Link className="btn accent" href={`/admin?storefront=${bundle.storefront.id}`}>
+              open admin review
             </Link>
           ) : (
-            <Link className="btn secondary" href="/">
-              try another link
+            <Link className="btn secondary" href="/admin">
+              open admin
             </Link>
           )}
         </section>

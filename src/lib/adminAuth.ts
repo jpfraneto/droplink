@@ -10,5 +10,11 @@ export function hasGenerationAccess(request: Request): boolean {
   const auth = request.headers.get("authorization") || "";
   const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
   const headerKey = request.headers.get("x-droplink-key") || "";
-  return bearer === expected || headerKey === expected;
+  const cookieKey = request.headers
+    .get("cookie")
+    ?.split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("droplink_admin="))
+    ?.split("=")[1];
+  return bearer === expected || headerKey === expected || cookieKey === expected;
 }

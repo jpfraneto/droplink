@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { ogPng } from "@/lib/og";
-import { getDropById, getProductsForDrop } from "@/lib/store";
+import { listStorefrontBundles } from "@/lib/store";
 
 export async function GET(_request: Request, { params }: { params: { dropId: string } }) {
-  const drop = await getDropById(params.dropId.replace(/\.png$/, ""));
-  if (!drop) return NextResponse.json({ error: "Drop not found." }, { status: 404 });
-  const products = await getProductsForDrop(drop.id);
-  const png = await ogPng(drop, products);
+  const id = params.dropId.replace(/\.png$/, "");
+  const bundles = await listStorefrontBundles();
+  const bundle = bundles.find((entry) => entry.activeCollection?.id === id || entry.ogImage?.id === id);
+  if (!bundle || !bundle.activeCollection) return NextResponse.json({ error: "OG image not found." }, { status: 404 });
+  const png = await ogPng(bundle.brand, bundle.activeCollection, bundle.relics);
 
   return new NextResponse(new Uint8Array(png), {
     headers: {

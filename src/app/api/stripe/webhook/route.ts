@@ -1,14 +1,20 @@
 import { headers } from "next/headers";
 import { NextResponse } from "next/server";
+import { createPrintfulDraftOrder, confirmPrintfulOrder } from "@/lib/printful";
 import { stripeClient } from "@/lib/stripe";
-import { updateOrderBySession } from "@/lib/store";
+import {
+  completeCheckoutSale,
+  createFulfillmentOrder,
+  expireCheckoutByStripeSession,
+  recordEvent
+} from "@/lib/store";
 
 export async function POST(request: Request) {
   const stripe = stripeClient();
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
   if (!stripe || !webhookSecret) {
-    return NextResponse.json({ received: true, mode: "mock" });
+    return NextResponse.json({ error: "Stripe webhook is not configured." }, { status: 500 });
   }
 
   const raw = await request.text();
@@ -19,11 +25,93 @@ export async function POST(request: Request) {
     const event = stripe.webhooks.constructEvent(raw, signature, webhookSecret);
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
-      await updateOrderBySession(session.id, {
-        status: "paid",
+      if (session.payment_status !== "paid") {
+        return NextResponse.json({ received: true, skipped: "checkout session is not paid" });
+      }
+      const sale = await completeCheckoutSale({
+        stripeSessionId: session.id,
         stripePaymentIntentId: typeof session.payment_intent === "string" ? session.payment_intent : null,
         customerEmail: session.customer_details?.email || null,
-        fulfillmentStatus: "pending"
+        shippingJson: session.customer_details ? { customerDetails: session.customer_details } : null
+      });
+      await recordEvent({
+        entityType: "relic",
+        entityId: sale.order.relicId,
+        eventType: "edition_sold",
+        level: "info",
+        message: "Stripe checkout completed; edition marked sold.",
+        metadataJson: { orderId: sale.order.id, checkoutSessionId: sale.order.checkoutSessionId },
+        requestId: request.headers.get("x-request-id"),
+        traceId: sale.bundle.storefront.generationTraceId || null
+      });
+      const relic = sale.bundle.relics.find((entry) => entry.id === sale.order.relicId);
+      if (relic) {
+        try {
+          const draft = await createPrintfulDraftOrder({
+            bundle: sale.bundle,
+            relic,
+            orderId: sale.order.id,
+            customerEmail: sale.order.customerEmail,
+            shippingJson: sale.order.shippingJson,
+            requestId: request.headers.get("x-request-id"),
+            traceId: sale.bundle.storefront.generationTraceId || null
+          });
+          const confirmed = draft.providerOrderId
+            ? await confirmPrintfulOrder({
+                providerOrderId: draft.providerOrderId,
+                requestId: request.headers.get("x-request-id"),
+                traceId: sale.bundle.storefront.generationTraceId || null
+              })
+            : { status: "draft_created" as const, responseJson: draft.responseJson };
+          await createFulfillmentOrder({
+            orderId: sale.order.id,
+            provider: "printful",
+            providerOrderId: draft.providerOrderId,
+            providerExternalId: draft.providerExternalId,
+            status: confirmed.status === "confirmed" ? "confirmed" : "draft_created",
+            requestJson: draft.requestJson,
+            responseJson: { draft: draft.responseJson, confirmation: confirmed.responseJson },
+            dashboardUrl: draft.dashboardUrl,
+            costsJson: draft.costsJson,
+            webhookEventsJson: {},
+            trackingUrl: null
+          });
+          await recordEvent({
+            entityType: "storefront",
+            entityId: sale.bundle.storefront.id,
+            eventType: confirmed.status === "confirmed" ? "printful_order_confirmed" : "printful_order_draft_created",
+            level: "info",
+            message: confirmed.status === "confirmed" ? "Printful order created and confirmed." : "Printful draft order created for manual review.",
+            metadataJson: { orderId: sale.order.id, providerOrderId: draft.providerOrderId },
+            requestId: request.headers.get("x-request-id"),
+            traceId: sale.bundle.storefront.generationTraceId || null
+          });
+        } catch (error) {
+          await recordEvent({
+            entityType: "storefront",
+            entityId: sale.bundle.storefront.id,
+            eventType: "fulfillment_failed",
+            level: "error",
+            message: error instanceof Error ? error.message : "Fulfillment failed.",
+            metadataJson: { orderId: sale.order.id },
+            requestId: request.headers.get("x-request-id"),
+            traceId: sale.bundle.storefront.generationTraceId || null
+          });
+        }
+      }
+    }
+    if (event.type === "checkout.session.expired") {
+      const session = event.data.object;
+      await expireCheckoutByStripeSession(session.id);
+      await recordEvent({
+        entityType: "checkout_session",
+        entityId: session.id,
+        eventType: "checkout_expired",
+        level: "info",
+        message: "Stripe checkout expired; edition released.",
+        metadataJson: {},
+        requestId: request.headers.get("x-request-id"),
+        traceId: null
       });
     }
     return NextResponse.json({ received: true });

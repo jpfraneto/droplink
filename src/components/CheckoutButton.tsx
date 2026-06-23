@@ -3,13 +3,11 @@
 import { useState } from "react";
 
 export function CheckoutButton({
-  dropId,
-  productId,
+  relicId,
   label = "BUY NOW",
   className = "btn accent"
 }: {
-  dropId: string;
-  productId: string;
+  relicId: string;
   label?: string;
   className?: string;
 }) {
@@ -23,7 +21,7 @@ export function CheckoutButton({
       const response = await fetch("/api/stripe/checkout", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ dropId, productId })
+        body: JSON.stringify({ relicId })
       });
       const data = (await response.json()) as { url?: string; error?: string };
       if (!response.ok || !data.url) throw new Error(data.error || "Could not start checkout.");

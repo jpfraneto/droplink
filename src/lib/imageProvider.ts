@@ -30,7 +30,7 @@ export async function generateOpenAIProductImage(prompt: string): Promise<Buffer
       if (image.ok) return Buffer.from(await image.arrayBuffer());
     }
   } catch (error) {
-    console.warn("OpenAI image generation failed; falling back to mock mockup.", error);
+    if (process.env.NODE_ENV === "production") throw error;
   }
 
   return null;

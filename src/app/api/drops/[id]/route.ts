@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
-import { getDropById, getProductsForDrop } from "@/lib/store";
+import { getStorefrontBundleById } from "@/lib/store";
 
 export async function GET(_request: Request, { params }: { params: { id: string } }) {
-  const drop = await getDropById(params.id);
-  if (!drop) return NextResponse.json({ error: "Drop not found." }, { status: 404 });
-  const products = await getProductsForDrop(drop.id);
-  return NextResponse.json({ drop, products });
+  const bundle = await getStorefrontBundleById(params.id);
+  if (!bundle) return NextResponse.json({ error: "Storefront not found." }, { status: 404 });
+  return NextResponse.json({ bundle });
 }

@@ -1,21 +1,19 @@
-import type { Drop } from "@/lib/types";
+import type { StorefrontBundle } from "@/lib/types";
 
-export function ClaimBanner({ drop }: { drop: Drop }) {
+export function ClaimBanner({ bundle }: { bundle: StorefrontBundle }) {
+  if (bundle.storefront.claimStatus === "verified") return null;
   return (
-    <section className="section">
-      <div className="receipt" style={{ gridTemplateColumns: "1.4fr .6fr", alignItems: "center" }}>
-        <div>
-          <h2 className="section-title" style={{ marginBottom: 8 }}>
-            Own this project?
-          </h2>
-          <p className="muted">
-            Claim this drop and connect Stripe to sell from your own account. DropLink records an 8% platform fee.
-          </p>
-        </div>
-        <button className="btn secondary" type="button">
-          connect Stripe
-        </button>
+    <section className="claim-strip">
+      <div>
+        <strong>Own this brand?</strong>
+        <span>Claim the storefront with a DNS TXT record.</span>
       </div>
+      <form action="/api/claims/start" method="post">
+        <input type="hidden" name="storefrontId" value={bundle.storefront.id} />
+        <button className="btn secondary" type="submit">
+          start claim
+        </button>
+      </form>
     </section>
   );
 }

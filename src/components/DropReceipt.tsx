@@ -1,42 +1,25 @@
-import type { Drop } from "@/lib/types";
+import type { StorefrontBundle } from "@/lib/types";
 
-export function DropReceipt({ drop }: { drop: Drop }) {
-  const receipt = drop.receiptJson;
+export function DropReceipt({ bundle }: { bundle: StorefrontBundle }) {
   return (
     <section className="section">
-      <h2 className="section-title">Drop Receipt</h2>
+      <h2 className="section-title">Storefront Receipt</h2>
       <div className="receipt">
         <div>
+          <h3>Brand</h3>
+          <p>{bundle.brand.name}</p>
+        </div>
+        <div>
           <h3>Source</h3>
-          <p>{receipt.source}</p>
+          <p>{bundle.brand.canonicalUrl}</p>
         </div>
         <div>
           <h3>Collection</h3>
-          <p>{receipt.collection}</p>
+          <p>{bundle.activeCollection?.title}</p>
         </div>
         <div>
-          <h3>What DropLink saw</h3>
-          <p>{receipt.whatDropLinkSaw}</p>
-        </div>
-        <div>
-          <h3>Audience</h3>
-          <p>{receipt.audience}</p>
-        </div>
-        <div>
-          <h3>Why these products</h3>
-          <p>{receipt.whyTheseProducts}</p>
-        </div>
-        <div>
-          <h3>Platform fee</h3>
-          <p>{receipt.platformFee}</p>
-        </div>
-        <div>
-          <h3>Status</h3>
-          <p>{receipt.status}. Not affiliated with the source unless claimed by owner.</p>
-        </div>
-        <div>
-          <h3>Receipt hash</h3>
-          <p>{drop.receiptHash.slice(0, 24)}</p>
+          <h3>Scarcity</h3>
+          <p>{bundle.relics.length} products, 8 units each.</p>
         </div>
       </div>
     </section>

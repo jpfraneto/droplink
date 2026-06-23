@@ -1,9 +1,10 @@
-import type { Drop } from "@/lib/types";
+import type { StorefrontBundle } from "@/lib/types";
 
-export function ShareCardPreview({ drop }: { drop: Drop }) {
+export function ShareCardPreview({ bundle }: { bundle: StorefrontBundle }) {
+  if (!bundle.ogImage) return null;
   return (
     <div className="share-card">
-      <img src={drop.ogImageUrl} alt={`${drop.collectionName} share image`} style={{ display: "block", width: "100%" }} />
+      <img src={bundle.ogImage.imageUrl} alt={`${bundle.activeCollection?.title || bundle.brand.name} share image`} style={{ display: "block", width: "100%" }} />
     </div>
   );
 }

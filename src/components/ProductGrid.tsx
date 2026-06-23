@@ -1,11 +1,24 @@
-import type { Drop, Product } from "@/lib/types";
+import type { Mockup, Relic, RelicEdition } from "@/lib/types";
 import { ProductCard } from "./ProductCard";
 
-export function ProductGrid({ drop, products }: { drop: Drop; products: Product[] }) {
+export function ProductGrid({
+  relics,
+  editions,
+  mockups
+}: {
+  relics: Relic[];
+  editions: RelicEdition[];
+  mockups: Mockup[];
+}) {
   return (
     <div className="grid">
-      {products.map((product) => (
-        <ProductCard key={product.id} drop={drop} product={product} />
+      {relics.map((relic) => (
+        <ProductCard
+          key={relic.id}
+          relic={relic}
+          editions={editions.filter((edition) => edition.relicId === relic.id)}
+          mockup={mockups.find((entry) => entry.relicId === relic.id)}
+        />
       ))}
     </div>
   );

@@ -1,25 +1,15 @@
 import { NextResponse } from "next/server";
-import { generateOpenAIProductImage } from "@/lib/imageProvider";
-import { productMockupSvg } from "@/lib/mockups";
-import { getDropById, getProductById } from "@/lib/store";
+import { relicMockupSvg } from "@/lib/mockups";
+import { listStorefrontBundles } from "@/lib/store";
 
 export async function GET(_request: Request, { params }: { params: { productId: string } }) {
-  const product = await getProductById(params.productId);
-  if (!product) return NextResponse.json({ error: "Product not found." }, { status: 404 });
-  const drop = await getDropById(product.dropId);
-  if (!drop) return NextResponse.json({ error: "Drop not found." }, { status: 404 });
+  const id = params.productId.replace(/\.svg$/, "");
+  const bundles = await listStorefrontBundles();
+  const bundle = bundles.find((entry) => entry.relics.some((relic) => relic.id === id));
+  const relic = bundle?.relics.find((entry) => entry.id === id);
+  if (!bundle || !relic) return NextResponse.json({ error: "Relic not found." }, { status: 404 });
 
-  const image = await generateOpenAIProductImage(product.imagePrompt);
-  if (image) {
-    return new NextResponse(new Uint8Array(image), {
-      headers: {
-        "content-type": "image/png",
-        "cache-control": "public, max-age=86400"
-      }
-    });
-  }
-
-  return new NextResponse(productMockupSvg(drop, product), {
+  return new NextResponse(relicMockupSvg(bundle.brand, relic), {
     headers: {
       "content-type": "image/svg+xml; charset=utf-8",
       "cache-control": "public, max-age=31536000, immutable"

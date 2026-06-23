@@ -19,3 +19,10 @@ export function uniqueSlug(base: string, existing: Set<string>): string {
   }
   return `${clean}-${Date.now()}`;
 }
+
+export function brandSlugFromUrl(input: string): string {
+  const parsed = new URL(input.trim());
+  const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  const slug = hostname.replace(/\./g, "").replace(/[^a-z0-9-]/g, "");
+  return slug || "brand";
+}
