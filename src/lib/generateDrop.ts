@@ -1,6 +1,11 @@
 import { createHash } from "crypto";
 import sharp from "sharp";
-import { BRAND_STUDY_PROMPT_VERSION, RELIC_PLAN_PROMPT_VERSION, planRelics, studyBrand } from "./hermesDropAgent";
+import {
+  BRAND_STUDY_PROMPT_VERSION,
+  RELIC_CRITIQUE_PROMPT_VERSION,
+  RELIC_PLAN_PROMPT_VERSION,
+  callHermesForCreativeTask
+} from "./hermesDropAgent";
 import { canonicalizeDropUrl } from "./dropCanonicalization";
 import { assertFiniteDropConfig, dropConfig } from "./env";
 import { newId } from "./hashes";
@@ -294,7 +299,9 @@ export async function generateDropFromUrl(
     };
 
     await event(storefrontId, "brand_study_started", "DISTILLING", traceId, "Brand study started.", {}, job.id);
-    const studied = await studyBrand({ ...page, traceId });
+    const studiedTask = await callHermesForCreativeTask({ type: "study_brand", input: { ...page, traceId } });
+    if (studiedTask.type !== "study_brand") throw new Error("Hermes returned the wrong result type for brand study.");
+    const studied = { study: studiedTask.study, modelVersion: studiedTask.modelVersion };
     brand.name = studied.study.brand_name;
     await event(storefrontId, "brand_study_succeeded", "DISTILLED", traceId, "Brand study generated.", {}, job.id);
     const brandStudy: BrandStudy = {
@@ -309,9 +316,38 @@ export async function generateDropFromUrl(
 
     await event(storefrontId, "relic_plan_started", "PLANNING_RELICS", traceId, "Relic planning started.", {}, job.id);
     const printfulCatalogOptions = await printfulCatalogOptionsForPlanning({ traceId });
-    const planned = await planRelics({ study: studied.study, relicCount: 3, collectionType: "drop", printfulCatalogOptions, traceId });
-    await event(storefrontId, "relic_plan_succeeded", "RELICS_PLANNED", traceId, "Relic plan generated.", {
-      relicCount: planned.plan.relics.length
+    const initialPlanTask = await callHermesForCreativeTask({
+      type: "plan_relics",
+      input: { study: studied.study, relicCount: 3, collectionType: "drop", printfulCatalogOptions, traceId }
+    });
+    if (initialPlanTask.type !== "plan_relics") throw new Error("Hermes returned the wrong result type for relic planning.");
+    await event(storefrontId, "relic_plan_drafted", "PLANNING_RELICS", traceId, "Initial relic triptych drafted.", {
+      relicCount: initialPlanTask.plan.relics.length,
+      dropConcept: initialPlanTask.plan.drop_concept
+    }, job.id);
+    const refinedPlanTask = await callHermesForCreativeTask({
+      type: "critique_relics",
+      input: {
+        study: studied.study,
+        initialPlan: initialPlanTask.plan,
+        relicCount: 3,
+        printfulCatalogOptions,
+        traceId
+      }
+    });
+    if (refinedPlanTask.type !== "critique_relics") throw new Error("Hermes returned the wrong result type for relic critique.");
+    const planned = {
+      plan: refinedPlanTask.plan,
+      modelVersion:
+        initialPlanTask.modelVersion === refinedPlanTask.modelVersion
+          ? initialPlanTask.modelVersion
+          : `${initialPlanTask.modelVersion}+${refinedPlanTask.modelVersion}`
+    };
+    const relicCritique = refinedPlanTask.critique;
+    await event(storefrontId, "relic_plan_succeeded", "RELICS_PLANNED", traceId, "Relic plan critiqued and refined.", {
+      relicCount: planned.plan.relics.length,
+      dropConcept: planned.plan.drop_concept,
+      critique: relicCritique
     }, job.id);
     const collection: Collection = {
       ...placeholderCollection,
@@ -321,7 +357,7 @@ export async function generateDropFromUrl(
     const relicPlan: RelicPlan = {
       id: newId("plan"),
       collectionId,
-      promptVersion: RELIC_PLAN_PROMPT_VERSION,
+      promptVersion: `${RELIC_PLAN_PROMPT_VERSION}/${RELIC_CRITIQUE_PROMPT_VERSION}`,
       modelVersion: planned.modelVersion,
       planJson: planned.plan,
       createdAt: now
@@ -385,20 +421,36 @@ export async function generateDropFromUrl(
       const selection = selectedVariants[index];
       const printAssetId = newId("asset");
       const previewAssetId = newId("asset");
+      const visualDna = studied.study.visual_dna;
       const prompt = [
-        `Create print-ready product artwork for ${brand.name}.`,
+        `Create print-ready product artwork for ${brand.name}, one relic in a cohesive three-object DropLink triptych.`,
         `Product: ${selection.product.name}, fixed variant: ${selection.variant.name}.`,
         `Placement: ${selection.placement}. Technique: ${selection.technique}.`,
-        `Product concept: ${relic.name}. ${relic.description}`,
+        `Triptych position: ${index + 1} of ${relics.length}.`,
+        `Drop concept: ${planned.plan.drop_concept}`,
+        `Drop lore: ${planned.plan.drop_lore}`,
+        `Drop narrative seed: ${studied.study.drop_narrative_seed}`,
+        `Relic concept: ${relic.name}. ${relic.description}`,
+        `Role in triptych: ${planEntry.role_in_triptych}`,
+        `Why this exists: ${relic.whyThisExists}`,
+        `Brand archetype: ${studied.study.archetype}`,
         `Brand essence: ${studied.study.essence}`,
         `Worldview: ${studied.study.worldview}`,
+        `Living brand invocation excerpt: ${studied.study.invocation.slice(0, 1200)}`,
+        `Visual DNA shapes: ${visualDna.core_shapes.join(", ")}`,
+        `Visual DNA material feel: ${visualDna.material_feel}`,
+        `Visual DNA composition rules: ${visualDna.composition_rules.join("; ")}`,
+        `Signature gesture: ${visualDna.signature_gesture}`,
         `Aesthetic motifs: ${studied.study.aesthetic_motifs.join(", ")}`,
         `Color palette: ${studied.study.color_palette.join(", ")}`,
         `Art direction: ${relic.artDirection}`,
+        "Make this artifact visually sibling to the other two relics: shared palette, shared symbolic grammar, distinct role.",
+        "Use precise, print-friendly geometry and a strong centered composition with intentional negative space.",
+        "If using words, use only short original phrases implied by the plan; avoid dense copy and avoid copying website text verbatim.",
         `Avoid: ${studied.study.things_to_avoid.join(", ")}`,
         page.ogImage ? `Use this source image only as loose brand reference, not as a logo to copy exactly: ${page.ogImage}` : "",
         page.favicon ? `Optional favicon reference: ${page.favicon}` : "",
-        "Use a clean centered composition. Avoid trademarked logos unless they are visibly present in the public source. No mockup, no shirt body, no background scene."
+        "Avoid trademarked logos unless they are visibly present in the public source. No mockup, no shirt body, no background scene."
       ].filter(Boolean).join("\n");
       const generated = await productArtBuffer(brand, relic, prompt);
       const normalizedPng = await sharp(generated.buffer).png({ compressionLevel: 9 }).toBuffer();
@@ -458,7 +510,10 @@ export async function generateDropFromUrl(
           imageProvider: generated.provider,
           manualUploadRequired: generated.validationStatus === "pending",
           sourceOgImage: page.ogImage || null,
-          sourceFavicon: page.favicon || null
+          sourceFavicon: page.favicon || null,
+          dropConcept: planned.plan.drop_concept,
+          roleInTriptych: planEntry.role_in_triptych,
+          relicCritique
         },
         createdAt: now
       };
@@ -572,11 +627,19 @@ export async function generateDropFromUrl(
     await event(storefrontId, "og_generation_started", "GENERATING_OG", traceId, "OG image generation started.", {}, job.id);
     const ogPrompt = [
       `Create a 1200x630 DropLink share image for ${brand.name}.`,
+      `Brand archetype: ${studied.study.archetype}`,
       `Brand essence: ${studied.study.essence}`,
       `Worldview: ${studied.study.worldview}`,
+      `Invocation excerpt: ${studied.study.invocation.slice(0, 900)}`,
       `Collection: ${collection.title} — ${collection.subtitle}`,
+      `Drop concept: ${planned.plan.drop_concept}`,
+      `Drop lore: ${planned.plan.drop_lore}`,
+      `Narrative seed: ${studied.study.drop_narrative_seed}`,
       `Use the three product artwork images as primary references and compose them together as one launch image.`,
-      `Products: ${relics.map((relic) => `${relic.relicIndex}. ${relic.name} (${relic.productFamily})`).join("; ")}`,
+      `Products: ${relics.map((relic, index) => `${relic.relicIndex}. ${relic.name} (${relic.productFamily}, ${planned.plan.relics[index]?.role_in_triptych || "triptych relic"})`).join("; ")}`,
+      `Visual DNA shapes: ${studied.study.visual_dna.core_shapes.join(", ")}`,
+      `Visual DNA material feel: ${studied.study.visual_dna.material_feel}`,
+      `Signature gesture: ${studied.study.visual_dna.signature_gesture}`,
       `Aesthetic motifs: ${studied.study.aesthetic_motifs.join(", ")}`,
       `Color palette: ${studied.study.color_palette.join(", ")}`,
       "Include no fake UI chrome, no unauthorized exact logos, no celebrity likenesses, and no extra product concepts.",
@@ -701,6 +764,7 @@ export async function generateDropFromUrl(
         urlCrawled: true,
         brandStudyGenerated: true,
         relicPlanValid: true,
+        relicPlanCritiqued: true,
         printfulVariantSelected: true,
         printFilesGenerated: true,
         printFilesValid: !manuallyGeneratedImages,
@@ -709,9 +773,10 @@ export async function generateDropFromUrl(
         editionsCreated: true,
         pricesMarginsValid: true,
         checkoutReady: Boolean(process.env.STRIPE_SECRET_KEY || process.env.NODE_ENV !== "production" || process.env.ALLOW_MOCKS === "true"),
-        fulfillmentReady: Boolean(process.env.PRINTFUL_API_KEY || process.env.NODE_ENV !== "production" || process.env.ALLOW_MOCKS === "true")
+        fulfillmentReady: Boolean(process.env.PRINTFUL_API_KEY || process.env.NODE_ENV !== "production" || process.env.ALLOW_MOCKS === "true"),
+        hermesCritique: relicCritique
       },
-      notes: null,
+      notes: relicCritique,
       createdAt: now,
       updatedAt: now
     };

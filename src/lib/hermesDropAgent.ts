@@ -2,15 +2,63 @@ import { z } from "zod";
 import { loggedExternalCall } from "./logger";
 import type { BrandStudyJson, RelicPlanJson } from "./types";
 
-export const BRAND_STUDY_PROMPT_VERSION = "brand-study-2026-06";
-export const RELIC_PLAN_PROMPT_VERSION = "relic-plan-2026-06";
+export const BRAND_STUDY_PROMPT_VERSION = "brand-study-agentic-2026-06";
+export const RELIC_PLAN_PROMPT_VERSION = "relic-triptych-agentic-2026-06";
+export const RELIC_CRITIQUE_PROMPT_VERSION = "relic-critique-agentic-2026-06";
+
+type BrandStudyInput = {
+  url: string;
+  domain: string;
+  title: string;
+  description: string;
+  textSample: string;
+  traceId: string;
+  requestId?: string | null;
+};
+
+type PlanRelicsInput = {
+  study: BrandStudyJson;
+  relicCount: 3;
+  collectionType: "drop";
+  printfulCatalogOptions?: Array<{ key: string; name: string; type: string; placements: string[] }>;
+  traceId: string;
+  requestId?: string | null;
+};
+
+type CritiqueRelicsInput = {
+  study: BrandStudyJson;
+  initialPlan: RelicPlanJson;
+  relicCount?: 3;
+  printfulCatalogOptions?: Array<{ key: string; name: string; type: string; placements: string[] }>;
+  traceId: string;
+  requestId?: string | null;
+};
+
+export type CreativeTask =
+  | { type: "study_brand"; input: BrandStudyInput }
+  | { type: "plan_relics"; input: PlanRelicsInput }
+  | { type: "critique_relics"; input: CritiqueRelicsInput };
+
+export type CreativeTaskResult =
+  | { type: "study_brand"; study: BrandStudyJson; modelVersion: string }
+  | { type: "plan_relics"; plan: RelicPlanJson; modelVersion: string }
+  | { type: "critique_relics"; plan: RelicPlanJson; critique: string; modelVersion: string };
 
 const brandStudySchema = z.object({
   brand_name: z.string().min(1),
   domain: z.string().min(1),
+  archetype: z.string().min(1),
+  invocation: z.string().min(800),
   essence: z.string().min(1),
   worldview: z.string().min(1),
   emotional_posture: z.string().min(1),
+  visual_dna: z.object({
+    core_shapes: z.array(z.string()).min(2),
+    material_feel: z.string().min(1),
+    composition_rules: z.array(z.string()).min(2),
+    signature_gesture: z.string().min(1)
+  }),
+  drop_narrative_seed: z.string().min(1),
   aesthetic_motifs: z.array(z.string()).min(2),
   color_palette: z.array(z.string()).min(3),
   language_style: z.string().min(1),
@@ -23,10 +71,13 @@ const brandStudySchema = z.object({
 const relicPlanSchema = z.object({
   collection_title: z.string().min(1),
   collection_subtitle: z.string().min(1),
+  drop_concept: z.string().min(1),
+  drop_lore: z.string().min(1),
   relics: z.array(
     z.object({
       name: z.string().min(1),
       archetype: z.string().min(1),
+      role_in_triptych: z.string().min(1),
       physical_archetype: z.enum(["garment", "poster", "tote", "sticker", "hat", "print", "other"]).default("other"),
       product_family: z.string().min(1),
       description: z.string().min(1),
@@ -36,6 +87,11 @@ const relicPlanSchema = z.object({
       printful_product_key: z.string().min(1)
     })
   )
+});
+
+const relicCritiqueSchema = z.object({
+  critique_text: z.string().min(1),
+  refined_plan: relicPlanSchema
 });
 
 export function validateBrandStudy(input: unknown): BrandStudyJson {
@@ -50,15 +106,325 @@ export function validateRelicPlan(input: unknown, relicCount: 3 | 8): RelicPlanJ
   return parsed;
 }
 
-export async function studyBrand(input: {
-  url: string;
-  domain: string;
-  title: string;
-  description: string;
-  textSample: string;
-  traceId: string;
-  requestId?: string | null;
-}): Promise<{ study: BrandStudyJson; modelVersion: string }> {
+function validateRelicCritique(input: unknown, relicCount: 3 | 8): { critique_text: string; refined_plan: RelicPlanJson } {
+  const parsed = relicCritiqueSchema.parse(input);
+  validateRelicPlan(parsed.refined_plan, relicCount);
+  return parsed;
+}
+
+function brandStudyPrompt(input: BrandStudyInput) {
+  return [
+    "ROLE",
+    "You are Hermes, the DropLink creative agent. Your job is to distill a public brand signal into a living creative source that can later become finite physical relics.",
+    "",
+    "GOAL",
+    "Interpret the brand as if it were a character with taste, posture, materials, rituals, and taboos. Make it useful for product creation without inventing private facts or claiming endorsement.",
+    "",
+    "METHOD",
+    "1. Read the public evidence: URL, domain, title, description, and visible text sample.",
+    "2. Separate observed brand signal from imaginative interpretation.",
+    "3. Personify the brand in the invocation: 280-420 words, vivid but grounded, no generic startup language.",
+    "4. Extract visual DNA that can guide image generation: shapes, material feel, composition rules, and a repeatable signature gesture.",
+    "5. Create a drop_narrative_seed that can bind exactly three future relics into one story.",
+    "",
+    "CONSTRAINTS",
+    "Output only JSON that matches the schema. Think privately before writing final JSON.",
+    "Do not create products yet. Do not invent founders, investors, users, metrics, partnerships, or private roadmap details.",
+    "Avoid counterfeit logos, celebrity likenesses, copyrighted characters, and direct brand mark replication unless clearly present in the public source.",
+    "",
+    "PUBLIC SOURCE",
+    `URL: ${input.url}`,
+    `Domain: ${input.domain}`,
+    `Title: ${input.title}`,
+    `Description: ${input.description}`,
+    `Visible text sample: ${input.textSample.slice(0, 2400)}`
+  ].join("\n");
+}
+
+function relicPlanPrompt(
+  input: PlanRelicsInput,
+  catalogOptions: Array<{ key: string; name: string; type: string; placements: string[] }>
+) {
+  return [
+    "ROLE",
+    "You are Hermes, the DropLink creative agent. You turn one living brand study into a finite triptych of physical relics.",
+    "",
+    "GOAL",
+    `Create exactly ${input.relicCount} relic products for one finite DropLink. The relics must feel like one intentional triptych, not three unrelated merch ideas.`,
+    "",
+    "DROP RULES",
+    "Each relic has exactly 8 physical editions. The complete run ends at 24 objects.",
+    "Each relic must be purchasable through the provided Printful catalog options.",
+    "Use printful_product_key exactly as provided. Do not invent catalog keys.",
+    "Each relic needs a distinct role_in_triptych, such as threshold, witness, instrument, banner, vessel, map, oath, or residue.",
+    "",
+    "METHOD",
+    "1. Re-read the brand invocation and drop_narrative_seed.",
+    "2. Define a single drop_concept that binds the three relics emotionally and visually.",
+    "3. Select three product forms that create contrast while sharing the same visual DNA.",
+    "4. Make each relic necessary: it should advance the triptych story and carry a different function in the ritual.",
+    "5. Keep the plan manufacturable as print-on-demand artwork: no impossible materials, electronics, embroidery-only assumptions, or multi-part objects.",
+    "",
+    "QUALITY BAR",
+    "The plan should feel alive, collectible, and specific to this brand. Avoid generic slogans, literal website screenshots, cheap logo placement, and bland startup swag.",
+    "Connect every relic explicitly to the invocation, visual_dna, and drop_narrative_seed.",
+    "Think privately before writing final JSON. Output only JSON that matches the schema.",
+    "",
+    `PRINTFUL CATALOG OPTIONS JSON: ${JSON.stringify(catalogOptions)}`,
+    `BRAND STUDY JSON: ${JSON.stringify(input.study)}`
+  ].join("\n");
+}
+
+function relicCritiquePrompt(
+  input: CritiqueRelicsInput,
+  catalogOptions: Array<{ key: string; name: string; type: string; placements: string[] }>
+) {
+  return [
+    "ROLE",
+    "You are Hermes in editor mode: a demanding creative director reviewing your own DropLink relic plan before it goes to image generation and production.",
+    "",
+    "GOAL",
+    "Critique and refine the initial plan so the final three relics read as one cohesive triptych, faithful to the living brand, emotionally strong, and practical for Printful fulfillment.",
+    "",
+    "REVIEW CHECKLIST",
+    "1. Cohesion: do the three relics share one drop_concept, visual DNA, and narrative arc?",
+    "2. Fidelity: do they clearly arise from the brand invocation and drop_narrative_seed rather than generic merch tropes?",
+    "3. Emotional strength: would a believer understand why these objects deserve to exist in only 8 editions each?",
+    "4. Manufacturability: do the product families and printful_product_key values remain valid catalog choices?",
+    "5. Image readiness: is the art_direction concrete enough for high-quality print artwork?",
+    "",
+    "REFINEMENT RULES",
+    "Return critique_text as a concise editorial note naming what changed and why.",
+    "Return refined_plan as the improved complete plan, not a patch.",
+    "Keep exactly three relics unless the schema asks otherwise. Preserve valid Printful keys exactly.",
+    "Think privately before writing final JSON. Output only JSON that matches the schema.",
+    "",
+    `PRINTFUL CATALOG OPTIONS JSON: ${JSON.stringify(catalogOptions)}`,
+    `BRAND STUDY JSON: ${JSON.stringify(input.study)}`,
+    `INITIAL RELIC PLAN JSON: ${JSON.stringify(input.initialPlan)}`
+  ].join("\n");
+}
+
+const defaultCatalogOptions = [
+  { key: "heavyweight tee", name: "Heavyweight tee", type: "garment", placements: ["front"] },
+  { key: "heavyweight hoodie", name: "Heavyweight hoodie", type: "garment", placements: ["front"] },
+  { key: "poster", name: "Poster", type: "print", placements: ["front"] },
+  { key: "tote bag", name: "Tote bag", type: "tote", placements: ["front"] },
+  { key: "hat", name: "Hat", type: "hat", placements: ["front"] },
+  { key: "sticker", name: "Sticker", type: "sticker", placements: ["front"] }
+];
+
+function hermesBridgeRequest(task: CreativeTask) {
+  const mode = process.env.HERMES_BRIDGE_MODE || "agent";
+  const maxTokens = Number(process.env.HERMES_BRIDGE_MAX_TOKENS || 3500);
+  if (task.type === "study_brand") {
+    const schema = brandStudyJsonSchema();
+    return {
+      mode,
+      tag: "FEATURE_IDEA",
+      max_tokens: maxTokens,
+      prompt: hermesAgentPrompt({
+        taskType: task.type,
+        promptVersion: BRAND_STUDY_PROMPT_VERSION,
+        schemaName: "droplink_brand_study",
+        schema,
+        prompt: brandStudyPrompt(task.input)
+      })
+    };
+  }
+  if (task.type === "plan_relics") {
+    const catalogOptions = task.input.printfulCatalogOptions?.length ? task.input.printfulCatalogOptions : defaultCatalogOptions;
+    const schema = relicPlanJsonSchema(task.input.relicCount, catalogOptions.map((entry) => entry.key));
+    return {
+      mode,
+      tag: "FEATURE_IDEA",
+      max_tokens: maxTokens,
+      prompt: hermesAgentPrompt({
+        taskType: task.type,
+        promptVersion: RELIC_PLAN_PROMPT_VERSION,
+        schemaName: "droplink_relic_plan",
+        schema,
+        prompt: relicPlanPrompt(task.input, catalogOptions)
+      })
+    };
+  }
+  const catalogOptions = task.input.printfulCatalogOptions?.length ? task.input.printfulCatalogOptions : defaultCatalogOptions;
+  const relicCount = task.input.relicCount || 3;
+  const schema = relicCritiqueJsonSchema(relicCount, catalogOptions.map((entry) => entry.key));
+  return {
+    mode,
+    tag: "FEATURE_IDEA",
+    max_tokens: maxTokens,
+    prompt: hermesAgentPrompt({
+      taskType: task.type,
+      promptVersion: RELIC_CRITIQUE_PROMPT_VERSION,
+      schemaName: "droplink_relic_critique",
+      schema,
+      prompt: relicCritiquePrompt(task.input, catalogOptions)
+    })
+  };
+}
+
+function hermesAgentPrompt(input: {
+  taskType: CreativeTask["type"];
+  promptVersion: string;
+  schemaName: string;
+  schema: Record<string, unknown>;
+  prompt: string;
+}) {
+  return [
+    input.prompt,
+    "",
+    "HERMES BRIDGE CONTRACT",
+    `Task type: ${input.taskType}`,
+    `Prompt version: ${input.promptVersion}`,
+    `Return schema name: ${input.schemaName}`,
+    "Return only valid JSON. Do not wrap it in Markdown. Do not include commentary before or after the JSON.",
+    "The JSON must validate against this schema:",
+    JSON.stringify(input.schema)
+  ].join("\n");
+}
+
+function parseHermesBridgeResponse(task: CreativeTask, body: unknown): CreativeTaskResult {
+  const parsed = parseBridgeJsonPayload(body);
+  if (task.type === "study_brand") {
+    const study = validateBrandStudy(objectProperty(parsed, "study") || parsed);
+    return { type: "study_brand", study, modelVersion: bridgeModelVersion(body) };
+  }
+  if (task.type === "plan_relics") {
+    const plan = validateRelicPlan(objectProperty(parsed, "plan") || parsed, task.input.relicCount);
+    return { type: "plan_relics", plan, modelVersion: bridgeModelVersion(body) };
+  }
+  const critiqueText = stringProperty(parsed, "critique_text") || stringProperty(parsed, "critique") || "";
+  const refinedPlan = objectProperty(parsed, "refined_plan") || objectProperty(parsed, "plan");
+  const relicCount = task.input.relicCount || 3;
+  if (refinedPlan) {
+    const plan = validateRelicPlan(refinedPlan, relicCount);
+    return { type: "critique_relics", plan, critique: critiqueText || "Hermes bridge returned a refined plan without critique text.", modelVersion: bridgeModelVersion(body) };
+  }
+  const critique = validateRelicCritique(parsed, relicCount);
+  return { type: "critique_relics", plan: critique.refined_plan, critique: critique.critique_text, modelVersion: bridgeModelVersion(body) };
+}
+
+function parseBridgeJsonPayload(body: unknown): unknown {
+  if (typeof body === "string") return parsePossiblyFencedJson(body);
+  const text =
+    stringProperty(body, "output_text") ||
+    stringProperty(body, "text") ||
+    stringProperty(body, "content") ||
+    stringProperty(body, "message") ||
+    stringProperty(objectProperty(body, "result"), "text") ||
+    stringProperty(objectProperty(body, "result"), "content");
+  if (text) return parsePossiblyFencedJson(text);
+  return objectProperty(body, "result") || objectProperty(body, "data") || body;
+}
+
+function parsePossiblyFencedJson(text: string): unknown {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1]?.trim();
+  const candidate = fenced || trimmed;
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    const objectMatch = candidate.match(/\{[\s\S]*\}/);
+    if (!objectMatch) throw new Error("Hermes bridge response did not include JSON.");
+    return JSON.parse(objectMatch[0]);
+  }
+}
+
+function objectProperty(input: unknown, key: string): Record<string, unknown> | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const value = (input as Record<string, unknown>)[key];
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function stringProperty(input: unknown, key: string): string | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const value = (input as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function bridgeModelVersion(body: unknown) {
+  return stringProperty(body, "modelVersion") || stringProperty(body, "model") || "hermes_bridge";
+}
+
+export async function callHermesForCreativeTask(task: CreativeTask): Promise<CreativeTaskResult> {
+  const mode = process.env.HERMES_MODE || "openai";
+  if (mode === "agent") {
+    try {
+      return await runHermesBridgeTask(task);
+    } catch (error) {
+      if (process.env.HERMES_AGENT_FALLBACK === "false") throw error;
+      console.warn(
+        `Hermes bridge creative task failed; falling back to structured provider: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`
+      );
+    }
+  }
+  if (task.type === "study_brand") {
+    const result = await runBrandStudy(task.input);
+    return { type: "study_brand", ...result };
+  }
+  if (task.type === "plan_relics") {
+    const result = await runRelicPlanning(task.input);
+    return { type: "plan_relics", ...result };
+  }
+  const result = await runRelicCritique(task.input);
+  return { type: "critique_relics", ...result };
+}
+
+async function runHermesBridgeTask(task: CreativeTask): Promise<CreativeTaskResult> {
+  const bridgeUrl = (process.env.HERMES_BRIDGE_URL || "https://hermes.anky.app").replace(/\/$/, "");
+  const bridgePath = process.env.HERMES_BRIDGE_PATH || "/prompt";
+  const endpoint = `${bridgeUrl}${bridgePath.startsWith("/") ? bridgePath : `/${bridgePath}`}`;
+  const bearerToken = process.env.HERMES_BRIDGE_TOKEN || process.env.HERMES_AGENT_TOKEN;
+  if (!bearerToken) throw new Error("HERMES_BRIDGE_TOKEN is required when HERMES_MODE=agent.");
+  const request = hermesBridgeRequest(task);
+  return loggedExternalCall(
+    { provider: "hermes_bridge", operation: task.type, traceId: task.input.traceId, requestId: task.input.requestId },
+    async () => {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${bearerToken}`
+        },
+        body: JSON.stringify(request)
+      });
+      if (!response.ok) throw new Error(`Hermes bridge returned ${response.status}: ${await response.text()}`);
+      const body = await response.json();
+      return parseHermesBridgeResponse(task, body);
+    }
+  );
+}
+
+export async function studyBrand(input: BrandStudyInput): Promise<{ study: BrandStudyJson; modelVersion: string }> {
+  const result = await callHermesForCreativeTask({ type: "study_brand", input });
+  if (result.type !== "study_brand") throw new Error("Unexpected Hermes task result for brand study.");
+  return { study: result.study, modelVersion: result.modelVersion };
+}
+
+export async function planRelics(input: PlanRelicsInput): Promise<{ plan: RelicPlanJson; modelVersion: string }> {
+  const result = await callHermesForCreativeTask({ type: "plan_relics", input });
+  if (result.type !== "plan_relics") throw new Error("Unexpected Hermes task result for relic planning.");
+  return { plan: result.plan, modelVersion: result.modelVersion };
+}
+
+export async function critiqueAndRefineRelics(
+  study: BrandStudyJson,
+  initialPlan: RelicPlanJson,
+  input: Omit<CritiqueRelicsInput, "study" | "initialPlan"> = { traceId: "unknown" }
+): Promise<{ plan: RelicPlanJson; critique: string; modelVersion: string }> {
+  const result = await callHermesForCreativeTask({
+    type: "critique_relics",
+    input: { ...input, study, initialPlan }
+  });
+  if (result.type !== "critique_relics") throw new Error("Unexpected Hermes task result for relic critique.");
+  return { plan: result.plan, critique: result.critique, modelVersion: result.modelVersion };
+}
+
+async function runBrandStudy(input: BrandStudyInput): Promise<{ study: BrandStudyJson; modelVersion: string }> {
   const provider = process.env.AI_PROVIDER || (process.env.OPENAI_API_KEY ? "openai" : "mock");
   if (provider === "openai" && process.env.OPENAI_API_KEY) {
     return loggedExternalCall(
@@ -69,15 +435,7 @@ export async function studyBrand(input: {
           model,
           schemaName: "droplink_brand_study",
           schema: brandStudyJsonSchema(),
-          prompt: [
-            "You are Hermes, the DropLink agent that distills one public URL into finite physical relics.",
-            "Study this public brand URL and output only JSON. Do not invent private facts. Do not create products.",
-            `URL: ${input.url}`,
-            `Domain: ${input.domain}`,
-            `Title: ${input.title}`,
-            `Description: ${input.description}`,
-            `Visible text sample: ${input.textSample.slice(0, 1800)}`
-          ].join("\n\n")
+          prompt: brandStudyPrompt(input)
         });
         return { study: validateBrandStudy(JSON.parse(text)), modelVersion: model };
       }
@@ -86,49 +444,52 @@ export async function studyBrand(input: {
   return { study: mockBrandStudy(input), modelVersion: "mock" };
 }
 
-export async function planRelics(input: {
-  study: BrandStudyJson;
-  relicCount: 3;
-  collectionType: "drop";
-  printfulCatalogOptions?: Array<{ key: string; name: string; type: string; placements: string[] }>;
-  traceId: string;
-  requestId?: string | null;
-}): Promise<{ plan: RelicPlanJson; modelVersion: string }> {
+async function runRelicPlanning(input: PlanRelicsInput): Promise<{ plan: RelicPlanJson; modelVersion: string }> {
   const provider = process.env.AI_PROVIDER || (process.env.OPENAI_API_KEY ? "openai" : "mock");
   if (provider === "openai" && process.env.OPENAI_API_KEY) {
     return loggedExternalCall(
       { provider: "openai", operation: "relic_plan", traceId: input.traceId, requestId: input.requestId },
       async () => {
         const model = process.env.OPENAI_MODEL || "gpt-5.5";
-        const catalogOptions = input.printfulCatalogOptions?.length
-          ? input.printfulCatalogOptions
-          : [
-              { key: "heavyweight tee", name: "Heavyweight tee", type: "garment", placements: ["front"] },
-              { key: "heavyweight hoodie", name: "Heavyweight hoodie", type: "garment", placements: ["front"] },
-              { key: "poster", name: "Poster", type: "print", placements: ["front"] },
-              { key: "tote bag", name: "Tote bag", type: "tote", placements: ["front"] },
-              { key: "hat", name: "Hat", type: "hat", placements: ["front"] },
-              { key: "sticker", name: "Sticker", type: "sticker", placements: ["front"] }
-            ];
+        const catalogOptions = input.printfulCatalogOptions?.length ? input.printfulCatalogOptions : defaultCatalogOptions;
         const text = await openAiJson({
           model,
           schemaName: "droplink_relic_plan",
           schema: relicPlanJsonSchema(input.relicCount, catalogOptions.map((entry) => entry.key)),
-          prompt: [
-            "You are Hermes, the DropLink agent that creates finite physical relic concepts from one public URL.",
-            `Create exactly ${input.relicCount} unique relic products for one finite DropLink.`,
-            "Each relic will have exactly 8 physical editions. The complete run is finite and ends at 24 objects.",
-            "Each product must include physical_archetype: garment, poster, tote, sticker, hat, print, or other.",
-            "Choose products from the provided Printful catalog options. Use printful_product_key exactly as provided; do not invent catalog keys.",
-            `Printful catalog options JSON: ${JSON.stringify(catalogOptions)}`,
-            `Brand study JSON: ${JSON.stringify(input.study)}`
-          ].join("\n\n")
+          prompt: relicPlanPrompt(input, catalogOptions)
         });
         return { plan: validateRelicPlan(JSON.parse(text), input.relicCount), modelVersion: model };
       }
     );
   }
   return { plan: mockRelicPlan(input.study, input.relicCount, input.collectionType), modelVersion: "mock" };
+}
+
+async function runRelicCritique(input: CritiqueRelicsInput): Promise<{ plan: RelicPlanJson; critique: string; modelVersion: string }> {
+  const provider = process.env.AI_PROVIDER || (process.env.OPENAI_API_KEY ? "openai" : "mock");
+  const relicCount = input.relicCount || 3;
+  const catalogOptions = input.printfulCatalogOptions?.length ? input.printfulCatalogOptions : defaultCatalogOptions;
+  if (provider === "openai" && process.env.OPENAI_API_KEY) {
+    return loggedExternalCall(
+      { provider: "openai", operation: "relic_critique", traceId: input.traceId, requestId: input.requestId },
+      async () => {
+        const model = process.env.OPENAI_MODEL || "gpt-5.5";
+        const text = await openAiJson({
+          model,
+          schemaName: "droplink_relic_critique",
+          schema: relicCritiqueJsonSchema(relicCount, catalogOptions.map((entry) => entry.key)),
+          prompt: relicCritiquePrompt(input, catalogOptions)
+        });
+        const parsed = validateRelicCritique(JSON.parse(text), relicCount);
+        return { plan: parsed.refined_plan, critique: parsed.critique_text, modelVersion: model };
+      }
+    );
+  }
+  return {
+    plan: validateRelicPlan(input.initialPlan, relicCount),
+    critique: "Mock critique: plan retained. Cohesion, brand fidelity, and emotional clarity are assumed acceptable in mock mode.",
+    modelVersion: "mock"
+  };
 }
 
 async function openAiJson(input: { model: string; schemaName: string; schema: Record<string, unknown>; prompt: string }) {
@@ -172,9 +533,13 @@ function brandStudyJsonSchema() {
     required: [
       "brand_name",
       "domain",
+      "archetype",
+      "invocation",
       "essence",
       "worldview",
       "emotional_posture",
+      "visual_dna",
+      "drop_narrative_seed",
       "aesthetic_motifs",
       "color_palette",
       "language_style",
@@ -186,9 +551,23 @@ function brandStudyJsonSchema() {
     properties: {
       brand_name: { type: "string" },
       domain: { type: "string" },
+      archetype: { type: "string" },
+      invocation: { type: "string" },
       essence: { type: "string" },
       worldview: { type: "string" },
       emotional_posture: { type: "string" },
+      visual_dna: {
+        type: "object",
+        additionalProperties: false,
+        required: ["core_shapes", "material_feel", "composition_rules", "signature_gesture"],
+        properties: {
+          core_shapes: { type: "array", minItems: 2, items: { type: "string" } },
+          material_feel: { type: "string" },
+          composition_rules: { type: "array", minItems: 2, items: { type: "string" } },
+          signature_gesture: { type: "string" }
+        }
+      },
+      drop_narrative_seed: { type: "string" },
       aesthetic_motifs: { type: "array", minItems: 2, items: { type: "string" } },
       color_palette: { type: "array", minItems: 3, items: { type: "string" } },
       language_style: { type: "string" },
@@ -206,10 +585,12 @@ function relicPlanJsonSchema(relicCount: 3 | 8, printfulProductKeys: string[] = 
   return {
     type: "object",
     additionalProperties: false,
-    required: ["collection_title", "collection_subtitle", "relics"],
+    required: ["collection_title", "collection_subtitle", "drop_concept", "drop_lore", "relics"],
     properties: {
       collection_title: { type: "string" },
       collection_subtitle: { type: "string" },
+      drop_concept: { type: "string" },
+      drop_lore: { type: "string" },
       relics: {
         type: "array",
         minItems: relicCount,
@@ -220,6 +601,7 @@ function relicPlanJsonSchema(relicCount: 3 | 8, printfulProductKeys: string[] = 
           required: [
             "name",
             "archetype",
+            "role_in_triptych",
             "physical_archetype",
             "product_family",
             "description",
@@ -231,6 +613,7 @@ function relicPlanJsonSchema(relicCount: 3 | 8, printfulProductKeys: string[] = 
           properties: {
             name: { type: "string" },
             archetype: { type: "string" },
+            role_in_triptych: { type: "string" },
             physical_archetype: { type: "string", enum: ["garment", "poster", "tote", "sticker", "hat", "print", "other"] },
             product_family: { type: "string" },
             description: { type: "string" },
@@ -241,6 +624,18 @@ function relicPlanJsonSchema(relicCount: 3 | 8, printfulProductKeys: string[] = 
           }
         }
       }
+    }
+  };
+}
+
+function relicCritiqueJsonSchema(relicCount: 3 | 8, printfulProductKeys: string[] = []) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["critique_text", "refined_plan"],
+    properties: {
+      critique_text: { type: "string" },
+      refined_plan: relicPlanJsonSchema(relicCount, printfulProductKeys)
     }
   };
 }
@@ -259,9 +654,23 @@ function mockBrandStudy(input: { domain: string; title: string; description: str
   return validateBrandStudy({
     brand_name: brandName,
     domain: input.domain,
+    archetype: "the signal keeper",
+    invocation: [
+      `${brandName} arrives like a small public ritual for people who prefer evidence over noise. It does not beg for attention; it leaves marks that a builder, collector, or early believer can recognize later as proof that they were present when the signal was still forming.`,
+      `The brand feels like a threshold between raw internet momentum and something more deliberate. Its posture is precise, strange, optimistic, and builder-native. It cares about the moment when a loose idea becomes a shared object, when a link stops being disposable and starts behaving like a place people can gather around.`,
+      `As a living character, ${brandName} is a keeper of portable proof. It carries diagrams, fragments, charged phrases, and visual tokens in its pockets. It likes clean contrast, compressed symbols, and artifacts that seem recovered from a future launch archive. It dislikes cheap hype, counterfeit authority, and merch that only repeats a name without adding meaning.`,
+      `A DropLink for ${brandName} should feel like three objects from the same ceremony: a mark worn on the body, a signal held in the hand, and a witness placed on the wall. Each piece should make the finite run feel intentional, as if only twenty-four people can hold a physical shard of the brand's current myth before it changes form.`
+    ].join(" "),
     essence,
     worldview: `${brandName} believes useful things should feel alive, memorable, and worth sharing.`,
     emotional_posture: "precise, strange, optimistic, and builder-native",
+    visual_dna: {
+      core_shapes: ["signal rings", "threshold frames", "small proof glyphs"],
+      material_feel: "matte black ink, sharp registration, archival paper, and utilitarian cotton",
+      composition_rules: ["center one charged symbol with generous negative space", "pair hard geometry with one human-scale phrase"],
+      signature_gesture: "a small threshold mark that looks like a link becoming an artifact"
+    },
+    drop_narrative_seed: "A three-part ceremony for turning a public link into proof of presence: body, carrier, witness.",
     aesthetic_motifs: ["signal marks", "threshold diagrams", "portable rituals"],
     color_palette: ["#111111", "#ff4f2e", "#f5d36b", "#58a6ff"],
     language_style: "short, charged, internet-native phrases with clear nouns",
@@ -278,9 +687,11 @@ function mockRelicPlan(study: BrandStudyJson, relicCount: 3, _collectionType: "d
   const relics = Array.from({ length: relicCount }, (_, index) => {
     const family = families[index % families.length];
     const archetype = archetypes[index % archetypes.length];
+    const roles = ["threshold", "instrument", "witness"];
     return {
       name: index === 0 ? `${study.brand_name} Genesis Signal` : `${study.brand_name} ${archetype[0].toUpperCase()}${archetype.slice(1)} ${index + 1}`,
       archetype,
+      role_in_triptych: roles[index % roles.length],
       physical_archetype: family.includes("tee") || family.includes("hoodie") ? "garment" : family.includes("poster") ? "poster" : family.includes("tote") ? "tote" : "other",
       product_family: family,
       description: `A limited ${family} carrying the ${study.essence.slice(0, 86)} signal.`,
@@ -294,6 +705,8 @@ function mockRelicPlan(study: BrandStudyJson, relicCount: 3, _collectionType: "d
     {
       collection_title: `${study.brand_name} DropLink`,
       collection_subtitle: "3 relics · 8 items each · 24 merch SKUs",
+      drop_concept: `${study.brand_name} turns a public signal into three linked artifacts of presence.`,
+      drop_lore: `${study.brand_name} leaves behind a finite triptych: one object to wear, one to carry, and one to witness the signal from the wall.`,
       relics
     },
     relicCount

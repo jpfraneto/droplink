@@ -527,9 +527,19 @@ async function createBundle(status: "summoned" | "claimed", submittedUrl: string
     studyJson: {
       brand_name: brand.name,
       domain: brand.hostname,
+      archetype: "signal keeper",
+      invocation:
+        "Test Brand behaves like a precise signal keeper for this fixture. It turns a public link into a finite ritual that can be checked, reviewed, priced, and published without relying on private claims. The brand carries a compact visual language of marks, thresholds, and proof glyphs that make the drop feel connected without needing copied logos. It is calm, useful, and intentionally limited, with each artifact acting as one part of a small ceremony. One object belongs on the body, one behaves like a portable tool, and one witnesses the signal from a wall or feed. The invocation is long enough to exercise production code that expects a living brand interpretation, but it stays grounded in the test's simple signal vocabulary.",
       essence: "signal",
       worldview: "world",
       emotional_posture: "precise",
+      visual_dna: {
+        core_shapes: ["signal mark", "threshold frame"],
+        material_feel: "matte ink on utilitarian cotton",
+        composition_rules: ["center the proof mark", "leave clear negative space"],
+        signature_gesture: "a small link-shaped threshold"
+      },
+      drop_narrative_seed: "A three-part proof of presence for a public signal.",
       aesthetic_motifs: ["signal", "ritual"],
       color_palette: ["#111", "#fff", "#f00"],
       language_style: "short",
@@ -548,9 +558,12 @@ async function createBundle(status: "summoned" | "claimed", submittedUrl: string
     planJson: {
       collection_title: collection.title,
       collection_subtitle: collection.subtitle,
+      drop_concept: "A cohesive proof-of-presence triptych.",
+      drop_lore: "Three finite objects carry the same signal through body, tool, and witness.",
       relics: relics.map((relic) => ({
         name: relic.name,
         archetype: relic.archetype,
+        role_in_triptych: `relic ${relic.relicIndex || 1} role`,
         physical_archetype: "garment",
         product_family: relic.productFamily,
         description: relic.description,

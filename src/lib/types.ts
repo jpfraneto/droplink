@@ -213,9 +213,18 @@ export type BrandSnapshot = {
 export type BrandStudyJson = {
   brand_name: string;
   domain: string;
+  archetype: string;
+  invocation: string;
   essence: string;
   worldview: string;
   emotional_posture: string;
+  visual_dna: {
+    core_shapes: string[];
+    material_feel: string;
+    composition_rules: string[];
+    signature_gesture: string;
+  };
+  drop_narrative_seed: string;
   aesthetic_motifs: string[];
   color_palette: string[];
   language_style: string;
@@ -238,9 +247,12 @@ export type BrandStudy = {
 export type RelicPlanJson = {
   collection_title: string;
   collection_subtitle: string;
+  drop_concept: string;
+  drop_lore: string;
   relics: Array<{
     name: string;
     archetype: string;
+    role_in_triptych: string;
     physical_archetype?: "garment" | "poster" | "tote" | "sticker" | "hat" | "print" | "other";
     product_family: string;
     description: string;
