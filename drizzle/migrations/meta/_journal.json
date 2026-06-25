@@ -22,6 +22,27 @@
       "when": 1782230000000,
       "tag": "0002_move_assets_to_r2",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1782300000000,
+      "tag": "0003_finite_droplink_mechanism",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1782380000000,
+      "tag": "0004_root_domain_payout_price_book",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1782470000000,
+      "tag": "0005_unbounded_generated_relic_descriptors",
+      "breakpoints": true
     }
   ]
 }

@@ -14,7 +14,11 @@ export async function POST(request: Request) {
       : Object.fromEntries((await request.formData()).entries());
   const storefrontId = String(raw.storefrontId || "");
   if (!storefrontId) return NextResponse.json({ error: "Missing storefrontId." }, { status: 400 });
-  const claim = await startDnsClaim(storefrontId);
+  const claim = await startDnsClaim(storefrontId, {
+    claimantWallet: raw.claimantWallet ? String(raw.claimantWallet) : null,
+    claimantEmail: raw.claimantEmail ? String(raw.claimantEmail) : null,
+    claimantName: raw.claimantName ? String(raw.claimantName) : null
+  });
   await recordEvent({
     entityType: "storefront",
     entityId: storefrontId,

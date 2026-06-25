@@ -88,8 +88,8 @@ export async function putStoredObject(input: {
     return stored;
   }
 
-  if (process.env.NODE_ENV === "production" || process.env.ALLOW_MOCKS !== "true") {
-    throw new Error("Only R2 storage is allowed outside explicit dev mock mode.");
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("Only R2 storage is allowed in production.");
   }
   return {
     key: input.key,

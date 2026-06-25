@@ -1,14 +1,18 @@
 import { createHash } from "crypto";
 import sharp from "sharp";
-import { BRAND_STUDY_PROMPT_VERSION, RELIC_PLAN_PROMPT_VERSION, planRelics, studyBrand } from "./atelierAi";
+import { BRAND_STUDY_PROMPT_VERSION, RELIC_PLAN_PROMPT_VERSION, planRelics, studyBrand } from "./hermesDropAgent";
+import { canonicalizeDropUrl } from "./dropCanonicalization";
+import { assertFiniteDropConfig, dropConfig } from "./env";
 import { newId } from "./hashes";
-import { generateOpenAIProductImage } from "./imageProvider";
+import { generateOpenAIProductImage, manualImageMode } from "./imageProvider";
 import { relicMockupSvg } from "./mockups";
-import { ogSvg } from "./og";
+import { ogPng as createOgPng } from "./og";
+import { buildDropPriceBook } from "./pricing";
 import {
   buildRelicFulfillmentSpec,
   createPrintfulMockup,
   mockupUrlsFromTask,
+  printfulCatalogOptionsForPlanning,
   printfulConfigured,
   selectPrintfulCatalogVariant,
   type SelectedPrintfulVariant
@@ -19,7 +23,6 @@ import {
   existingStorefrontSlugs,
   recordEvent,
   saveGeneratedBundle,
-  tierRelicCount,
   updateGenerationJobStep,
   updateGenerationStep
 } from "./store";
@@ -32,6 +35,8 @@ import type {
   BrandSnapshot,
   BrandStudy,
   Collection,
+  Drop,
+  DropSourceSignal,
   GenerationJob,
   GenerationStep,
   Mockup,
@@ -40,11 +45,10 @@ import type {
   RelicEdition,
   RelicPlan,
   Storefront,
-  StorefrontBundle,
-  StorefrontTier
+  StorefrontBundle
 } from "./types";
 
-const GENERATOR_VERSION = "atelier-backend-v1";
+const GENERATOR_VERSION = "hermes-drop-agent";
 
 function appUrl(): string {
   return (process.env.DROPLINK_PUBLIC_BASE_URL || process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000").replace(
@@ -68,6 +72,14 @@ async function pngMetadata(buffer: Buffer) {
 }
 
 async function productArtBuffer(brand: Brand, relic: Relic, prompt: string) {
+  if (manualImageMode()) {
+    const svg = relicMockupSvg(brand, relic);
+    return {
+      buffer: await sharp(Buffer.from(svg)).png().toBuffer(),
+      validationStatus: "pending" as const,
+      provider: "manual_chatgpt"
+    };
+  }
   const generated = await generateOpenAIProductImage(prompt);
   if (generated) return { buffer: generated, validationStatus: "valid" as const, provider: "openai" };
   if (process.env.NODE_ENV === "production" || process.env.ALLOW_MOCKS !== "true") {
@@ -106,27 +118,34 @@ async function event(
 
 export async function generateDropFromUrl(
   url: string,
-  options: { tier?: StorefrontTier; type?: "genesis" | "weekly"; jobId?: string; traceId?: string } = {}
+  options: {
+    jobId?: string;
+    traceId?: string;
+    summonerWallet?: string | null;
+    creatorDisplayName?: string | null;
+    summonPaymentTxHash?: string | null;
+    summonPaymentMetadataJson?: Record<string, unknown> | null;
+  } = {}
 ): Promise<StorefrontBundle> {
+  assertFiniteDropConfig();
+  const canonicalTarget = canonicalizeDropUrl(url);
   const normalized = await normalizePublicUrl(url);
-  const canonicalUrl = normalized.toString();
-  const hostname = domainFromUrl(canonicalUrl);
+  const canonicalUrl = canonicalTarget.canonicalUrl;
+  const sourceUrl = canonicalTarget.sourceUrl;
+  const hostname = canonicalTarget.canonicalRootDomain || canonicalTarget.canonicalDomain || domainFromUrl(canonicalUrl);
   const traceId = options.traceId || newId("run");
   const now = new Date().toISOString();
+  const dropId = `drop_${canonicalTarget.rootDomainHash.slice(0, 24)}`;
   const brandId = newId("brand");
   const storefrontId = newId("store");
   const collectionId = newId("col");
-  const tier = options.tier || "free";
-  const type = options.type || "genesis";
-  const relicCount = tierRelicCount(tier, type);
-  if (type === "genesis" && relicCount !== 3) throw new Error("Free genesis generation must create exactly 3 relics.");
-  if (type === "weekly" && relicCount !== 8) throw new Error("Weekly generation must create exactly 8 relics.");
+  const relicCount = dropConfig.relicsPerDrop;
   const baseSlug = brandSlugFromUrl(canonicalUrl);
   const slug = uniqueSlug(baseSlug, await existingStorefrontSlugs());
 
   const brand: Brand = {
     id: brandId,
-    canonicalUrl,
+    canonicalUrl: `https://${hostname}/`,
     hostname,
     slug,
     name: hostname.replace(/\..*/, "").replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
@@ -137,11 +156,10 @@ export async function generateDropFromUrl(
     id: storefrontId,
     brandId,
     slug,
-    status: "draft",
-    tier,
+    status: "summoned",
     claimStatus: "unclaimed",
     commerceMode: "preview",
-    commissionBps: tier === "atelier" ? 0 : 800,
+    commissionBps: 0,
     customDomain: null,
     stripeConnectedAccountId: null,
     generationStatus: "INTAKE_CREATED",
@@ -150,13 +168,86 @@ export async function generateDropFromUrl(
     updatedAt: now,
     publishedAt: null
   };
+  const dnsClaimNonce = newId("dns").replace(/^dns_/, "");
+  const drop: Drop = {
+    id: dropId,
+    storefrontId,
+    originalSubmittedUrl: canonicalTarget.originalSubmittedUrl,
+    submittedHost: canonicalTarget.submittedHost,
+    submittedPath: canonicalTarget.submittedPath,
+    sourceUrl,
+    canonicalUrl,
+    canonicalDomain: hostname,
+    canonicalRootDomain: canonicalTarget.canonicalRootDomain,
+    registrableDomain: canonicalTarget.registrableDomain,
+    rootDomainHash: canonicalTarget.rootDomainHash,
+    domainHash: canonicalTarget.rootDomainHash,
+    status: "summoned",
+    domainClaimStatus: "unclaimed",
+    payoutStatus: "missing",
+    payoutMethod: "none",
+    publishStatus: "blocked",
+    summonerWallet: options.summonerWallet || null,
+    creatorDisplayName: options.creatorDisplayName || null,
+    summonPaymentTxHash: options.summonPaymentTxHash || null,
+    summonPaymentMetadataJson: options.summonPaymentMetadataJson || null,
+    summonPriceUsdc: dropConfig.summonPriceUsdc,
+    creatorBountyBps: dropConfig.creatorBountyBps,
+    protocolFeeBps: dropConfig.protocolFeeBps,
+    totalSupply: dropConfig.totalSupply,
+    relicsPerDrop: dropConfig.relicsPerDrop,
+    editionsPerRelic: dropConfig.editionsPerRelic,
+    dnsClaimNonce,
+    dnsRecordName: `_droplink.${hostname}`,
+    dnsRecordValue: `droplink-claim=${dnsClaimNonce}`,
+    domainOwnerName: null,
+    domainOwnerWallet: null,
+    domainOwnerEmail: null,
+    domainClaimProofJson: null,
+    domainClaimedAt: null,
+    tempoWalletAddress: null,
+    tempoWalletVerifiedAt: null,
+    tempoWalletVerificationProofJson: null,
+    payoutNonce: null,
+    payoutDnsRecordName: null,
+    payoutDnsRecordValue: null,
+    stripeConnectAccountId: null,
+    stripeConnectStatus: null,
+    stripeConnectOnboardingUrl: null,
+    stripeConnectVerifiedAt: null,
+    payoutConfiguredAt: null,
+    priceBookJson: null,
+    projectedEconomicsJson: null,
+    priceBookLockedAt: null,
+    publishedAt: null,
+    soldOutAt: null,
+    archivedAt: null,
+    readinessJson: null,
+    createdAt: now,
+    updatedAt: now
+  };
+  const sourceSignals: DropSourceSignal[] = [
+    {
+      id: newId("sig"),
+      dropId,
+      submittedUrl: canonicalTarget.originalSubmittedUrl,
+      submittedHost: canonicalTarget.submittedHost,
+      submittedPath: canonicalTarget.submittedPath,
+      normalizedUrl: sourceUrl,
+      submittedByWallet: options.summonerWallet || null,
+      submittedAt: now,
+      usedForGeneration: true,
+      signalMetadataJson: { reason: "initial summon source" }
+    }
+  ];
   const placeholderCollection: Collection = {
     id: collectionId,
     storefrontId,
-    type,
+    dropId,
+    type: "drop",
     status: "generating",
-    title: `${brand.name} Genesis Relics`,
-    subtitle: type === "weekly" ? "8 products · 8 units each" : "3 unique products · 8 units each",
+    title: `${brand.name} DropLink Relics`,
+    subtitle: "3 relics · 8 items each · 24 merch SKUs",
     relicCount,
     ogImageId: null,
     generatorVersion: GENERATOR_VERSION,
@@ -169,10 +260,10 @@ export async function generateDropFromUrl(
     storefrontId,
     collectionId,
     traceId,
-    type,
+    type: "drop",
     status: "running",
     currentStep: "INTAKE_CREATED",
-    inputJson: { url: canonicalUrl, tier, type },
+    inputJson: { url: canonicalUrl, dropId, canonicalDomain: hostname },
     error: null,
     createdAt: now,
     updatedAt: now
@@ -190,7 +281,7 @@ export async function generateDropFromUrl(
 
   try {
     await event(storefrontId, "crawl_started", "CRAWLING", traceId, "Crawling source URL.", {}, job.id);
-    const page = await scrapePublicPage(canonicalUrl);
+    const page = await scrapePublicPage(sourceUrl);
     await event(storefrontId, "crawl_succeeded", "CRAWLED", traceId, "Source URL crawled.", { title: page.title }, job.id);
     const snapshot: BrandSnapshot = {
       id: newId("snap"),
@@ -217,7 +308,8 @@ export async function generateDropFromUrl(
     };
 
     await event(storefrontId, "relic_plan_started", "PLANNING_RELICS", traceId, "Relic planning started.", {}, job.id);
-    const planned = await planRelics({ study: studied.study, relicCount: relicCount as 3 | 8, collectionType: type, traceId });
+    const printfulCatalogOptions = await printfulCatalogOptionsForPlanning({ traceId });
+    const planned = await planRelics({ study: studied.study, relicCount: 3, collectionType: "drop", printfulCatalogOptions, traceId });
     await event(storefrontId, "relic_plan_succeeded", "RELICS_PLANNED", traceId, "Relic plan generated.", {
       relicCount: planned.plan.relics.length
     }, job.id);
@@ -244,7 +336,7 @@ export async function generateDropFromUrl(
           name: entry.name,
           archetype: entry.archetype,
           physicalArchetype: entry.physical_archetype,
-          productFamily: entry.product_family,
+          productFamily: `${entry.product_family} ${entry.printful_product_key}`,
           description: entry.description,
           artDirection: entry.art_direction,
           suggestedPriceCents: entry.suggested_price_cents,
@@ -260,6 +352,8 @@ export async function generateDropFromUrl(
       return {
         id: relicId,
         collectionId,
+        dropId,
+        relicIndex: index + 1,
         slug: relicSlug,
         name: entry.name,
         archetype: entry.archetype,
@@ -283,6 +377,7 @@ export async function generateDropFromUrl(
     await event(storefrontId, "printful_matched", "PRINTFUL_MATCHED", traceId, "All products matched to fixed Printful catalog variants.", {}, job.id);
 
     await event(storefrontId, "print_files_started", "GENERATING_PRINT_FILES", traceId, "Generating print files.", {}, job.id);
+    const manuallyGeneratedImages = manualImageMode();
     const assets: Asset[] = [];
     const mockups: Mockup[] = [];
     for (const [index, relic] of relics.entries()) {
@@ -295,9 +390,16 @@ export async function generateDropFromUrl(
         `Product: ${selection.product.name}, fixed variant: ${selection.variant.name}.`,
         `Placement: ${selection.placement}. Technique: ${selection.technique}.`,
         `Product concept: ${relic.name}. ${relic.description}`,
+        `Brand essence: ${studied.study.essence}`,
+        `Worldview: ${studied.study.worldview}`,
+        `Aesthetic motifs: ${studied.study.aesthetic_motifs.join(", ")}`,
+        `Color palette: ${studied.study.color_palette.join(", ")}`,
         `Art direction: ${relic.artDirection}`,
+        `Avoid: ${studied.study.things_to_avoid.join(", ")}`,
+        page.ogImage ? `Use this source image only as loose brand reference, not as a logo to copy exactly: ${page.ogImage}` : "",
+        page.favicon ? `Optional favicon reference: ${page.favicon}` : "",
         "Use a clean centered composition. Avoid trademarked logos unless they are visibly present in the public source. No mockup, no shirt body, no background scene."
-      ].join("\n");
+      ].filter(Boolean).join("\n");
       const generated = await productArtBuffer(brand, relic, prompt);
       const normalizedPng = await sharp(generated.buffer).png({ compressionLevel: 9 }).toBuffer();
       const previewWebp = await sharp(normalizedPng)
@@ -353,7 +455,10 @@ export async function generateDropFromUrl(
           byteSize: printObject.byteSize,
           placement: fulfillmentSpec.placement,
           technique: fulfillmentSpec.technique,
-          imageProvider: generated.provider
+          imageProvider: generated.provider,
+          manualUploadRequired: generated.validationStatus === "pending",
+          sourceOgImage: page.ogImage || null,
+          sourceFavicon: page.favicon || null
         },
         createdAt: now
       };
@@ -401,21 +506,86 @@ export async function generateDropFromUrl(
           imageUrl: previewObject.url,
           printfulTaskId: null,
           viewName: "front",
-          status: generated.validationStatus === "valid" ? "pending" : "mock",
+          status: generated.validationStatus === "valid" ? "pending" : generated.validationStatus === "pending" ? "manual_pending" : "mock",
           createdAt: now
         });
       }
+      const relicMockup = mockups[mockups.length - 1];
+      await event(storefrontId, "relic_assets_generated", "GENERATING_PRINT_FILES", traceId, `Generated assets for ${relic.name}.`, {
+        relicId: relic.id,
+        relicIndex: relic.relicIndex,
+        relicName: relic.name,
+        productName: fulfillmentSpec.productName,
+        variantName: fulfillmentSpec.variantName,
+        catalogProductId: fulfillmentSpec.catalogProductId,
+        catalogVariantId: fulfillmentSpec.catalogVariantId,
+        placement: fulfillmentSpec.placement,
+        technique: fulfillmentSpec.technique,
+        printFileUrl: printObject.url,
+        previewUrl: previewObject.url,
+        printFileSha256: fileSha256,
+        mockupStatus: relicMockup?.status,
+        mockupTaskId: relicMockup?.printfulTaskId || null,
+        mockupImageUrl: relicMockup?.imageUrl || null
+      }, job.id);
     }
     await event(storefrontId, "print_files_ready", "PRINT_FILES_READY", traceId, "Print files generated.", {}, job.id);
-    await event(storefrontId, "print_files_valid", "PRINT_FILES_VALID", traceId, "Print files passed conservative validation.", {}, job.id);
+    if (manuallyGeneratedImages) {
+      await event(
+        storefrontId,
+        "manual_product_image_prompts_ready",
+        "AWAITING_MANUAL_IMAGES",
+        traceId,
+        "Manual product image prompts are ready for admin upload.",
+        { relicIds: relics.map((relic) => relic.id) },
+        job.id
+      );
+    } else {
+      await event(storefrontId, "print_files_valid", "PRINT_FILES_VALID", traceId, "Print files passed conservative validation.", {}, job.id);
+    }
     await event(storefrontId, "mockups_ready", "MOCKUPS_READY", traceId, "Printful mockup generation attempted.", {
       ready: mockups.filter((mockup) => mockup.status === "ready").length,
       total: mockups.length
     }, job.id);
 
+    const priceBook = buildDropPriceBook({
+      dropId,
+      relics,
+      generatedAt: now,
+      generatedBy: "hermes-drop-agent",
+      summonFeeUsd: drop.summonPriceUsdc
+    });
+    drop.priceBookJson = priceBook;
+    drop.projectedEconomicsJson = priceBook.totals;
+    for (const relic of relics) {
+      const price = priceBook.relics.find((entry) => entry.relicId === relic.id);
+      if (!price) throw new Error(`Price book missing relic ${relic.id}.`);
+      relic.unitPriceUsd = price.unitPriceUsd;
+      relic.priceBookId = dropId;
+      relic.priceCents = Math.round(Number(price.unitPriceUsd) * 100);
+    }
+    await event(storefrontId, "price_book_generated", "PRINT_FILES_VALID", traceId, "Draft price book and projected economics generated.", {
+      projectedDomainOwnerProceedsUsd: priceBook.totals.projectedDomainOwnerProceedsUsd,
+      maxGrossRevenueUsd: priceBook.totals.maxGrossRevenueUsd
+    }, job.id);
+
     await event(storefrontId, "og_generation_started", "GENERATING_OG", traceId, "OG image generation started.", {}, job.id);
-    const og = ogSvg(brand, collection, relics);
-    const ogPng = await sharp(Buffer.from(og)).png({ compressionLevel: 9 }).toBuffer();
+    const ogPrompt = [
+      `Create a 1200x630 DropLink share image for ${brand.name}.`,
+      `Brand essence: ${studied.study.essence}`,
+      `Worldview: ${studied.study.worldview}`,
+      `Collection: ${collection.title} — ${collection.subtitle}`,
+      `Use the three product artwork images as primary references and compose them together as one launch image.`,
+      `Products: ${relics.map((relic) => `${relic.relicIndex}. ${relic.name} (${relic.productFamily})`).join("; ")}`,
+      `Aesthetic motifs: ${studied.study.aesthetic_motifs.join(", ")}`,
+      `Color palette: ${studied.study.color_palette.join(", ")}`,
+      "Include no fake UI chrome, no unauthorized exact logos, no celebrity likenesses, and no extra product concepts.",
+      "Make it feel like one coherent finite drop, not a collage of unrelated mockups."
+    ].join("\n");
+    const ogPng = await createOgPng(brand, collection, relics, {
+      imageUrls: relics.map((relic) => mockups.find((mockup) => mockup.relicId === relic.id)?.imageUrl),
+      publicPath: `${(process.env.DROPLINK_PUBLIC_BASE_URL || "https://droplink.lat").replace(/^https?:\/\//, "").replace(/\/$/, "")}/${slug}`
+    });
     const ogWebp = await sharp(ogPng).webp({ quality: 82 }).toBuffer();
     const ogChecksum = checksumBuffer(ogPng);
     const ogWebpChecksum = checksumBuffer(ogWebp);
@@ -441,9 +611,17 @@ export async function generateDropFromUrl(
       width: 1200,
       height: 630,
       checksum: ogChecksum,
-      prompt: `OG for ${collection.title}`,
-      validationStatus: "valid",
-      metadataJson: { fileType: "png", contentType: "image/png", storageKey: ogObject.key, byteSize: ogObject.byteSize },
+      prompt: ogPrompt,
+      validationStatus: manuallyGeneratedImages ? "pending" : "valid",
+      metadataJson: {
+        fileType: "png",
+        contentType: "image/png",
+        storageKey: ogObject.key,
+        byteSize: ogObject.byteSize,
+        imageProvider: manuallyGeneratedImages ? "manual_chatgpt" : "sharp_composite",
+        manualUploadRequired: manuallyGeneratedImages,
+        sourceRelicIds: relics.map((relic) => relic.id)
+      },
       createdAt: now
     };
     assets.push(ogAsset);
@@ -475,32 +653,45 @@ export async function generateDropFromUrl(
       imageUrl: ogAsset.url,
       title: collection.title,
       subtitle: collection.subtitle,
-      prompt: `Brand vibe background with ${relicCount} products and scarcity line.`,
-      compositionJson: { relicIds: relics.map((relic) => relic.id), collectionType: type },
-      status: "ready",
+      prompt: ogPrompt,
+      compositionJson: { relicIds: relics.map((relic) => relic.id), collectionType: "drop" },
+      status: manuallyGeneratedImages ? "manual_pending" : "ready",
       createdAt: now
     };
     collection.ogImageId = ogImage.id;
-    await event(storefrontId, "og_generation_succeeded", "OG_READY", traceId, "OG image generated.", {}, job.id);
+    await event(storefrontId, manuallyGeneratedImages ? "manual_og_prompt_ready" : "og_generation_succeeded", manuallyGeneratedImages ? "AWAITING_MANUAL_IMAGES" : "OG_READY", traceId, manuallyGeneratedImages ? "Manual OG image prompt is ready for admin upload." : "OG image generated.", {
+      ogImageUrl: ogAsset.url,
+      ogWebpUrl: ogWebpObject.url,
+      width: 1200,
+      height: 630,
+      relicIds: relics.map((relic) => relic.id)
+    }, job.id);
 
     const editions: RelicEdition[] = relics.flatMap((relic) =>
       Array.from({ length: 8 }, (_, index) => ({
         id: newId("ed"),
+        dropId,
         relicId: relic.id,
         editionNumber: index + 1,
+        globalEditionNumber: (Number(relic.relicIndex || 1) - 1) * 8 + index + 1,
         status: "available" as const,
         checkoutSessionId: null,
+        stripePaymentIntentId: null,
         orderId: null,
+        reservedAt: null,
         reservedUntil: null,
         soldAt: null,
+        buyerEmailHash: null,
+        printfulOrderId: null,
+        onchainReceiptTxHash: null,
         createdAt: now,
         updatedAt: now
       }))
     );
 
     collection.status = "ready_for_review";
-    storefront.status = "ready_for_review";
-    storefront.generationStatus = "READY_FOR_REVIEW";
+    storefront.status = "summoned";
+    storefront.generationStatus = manuallyGeneratedImages ? "AWAITING_MANUAL_IMAGES" : "READY_FOR_REVIEW";
     const adminReview: AdminReview = {
       id: newId("review"),
       storefrontId,
@@ -512,9 +703,9 @@ export async function generateDropFromUrl(
         relicPlanValid: true,
         printfulVariantSelected: true,
         printFilesGenerated: true,
-        printFilesValid: true,
-        mockupsGenerated: true,
-        ogGenerated: true,
+        printFilesValid: !manuallyGeneratedImages,
+        mockupsGenerated: !manuallyGeneratedImages,
+        ogGenerated: !manuallyGeneratedImages,
         editionsCreated: true,
         pricesMarginsValid: true,
         checkoutReady: Boolean(process.env.STRIPE_SECRET_KEY || process.env.NODE_ENV !== "production" || process.env.ALLOW_MOCKS === "true"),
@@ -525,12 +716,14 @@ export async function generateDropFromUrl(
       updatedAt: now
     };
     job.status = "completed";
-    job.currentStep = "READY_FOR_REVIEW";
+    job.currentStep = manuallyGeneratedImages ? "AWAITING_MANUAL_IMAGES" : "READY_FOR_REVIEW";
     job.updatedAt = now;
 
     const bundle = await saveGeneratedBundle({
       brand,
+      drop,
       storefront,
+      sourceSignals,
       snapshot,
       study: brandStudy,
       collection,

@@ -27,8 +27,6 @@ const worker = new Worker<GenerationQueuePayload>(
       traceId: input.traceId
     });
     return generateDropFromUrl(input.url, {
-      tier: input.tier,
-      type: input.type,
       jobId: input.jobId,
       traceId: input.traceId
     });

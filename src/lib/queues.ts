@@ -1,15 +1,12 @@
 import { Queue, QueueEvents, type ConnectionOptions, type JobsOptions } from "bullmq";
 import { newId } from "./hashes";
 import { logger } from "./logger";
-import { createGenerationJob, recordEvent } from "./store";
-import type { StorefrontTier } from "./types";
+import { createGenerationJob, recordEvent, updateGenerationJobStep } from "./store";
 
 export type GenerationQueuePayload = {
   jobId: string;
   traceId: string;
   url: string;
-  tier: StorefrontTier;
-  type: "genesis" | "weekly";
 };
 
 let connection: ConnectionOptions | null = null;
@@ -72,23 +69,39 @@ export function defaultGenerationJobOptions(): JobsOptions {
 
 export async function enqueueGeneration(input: {
   url: string;
-  tier: StorefrontTier;
-  type: "genesis" | "weekly";
   requestId?: string | null;
 }) {
   const traceId = newId("run");
   const job = await createGenerationJob({
     traceId,
-    type: input.type,
-    inputJson: { url: input.url, tier: input.tier, type: input.type, queue: GENERATION_QUEUE_NAME }
+    type: "drop",
+    inputJson: { url: input.url, type: "drop", queue: GENERATION_QUEUE_NAME }
   });
   const payload: GenerationQueuePayload = {
     jobId: job.id,
     traceId,
-    url: input.url,
-    tier: input.tier,
-    type: input.type
+    url: input.url
   };
+  if (!redisConfigured() && process.env.NODE_ENV !== "production") {
+    logger.info("queue.generation.inline_dev", {
+      queue: "inline-dev",
+      jobId: job.id,
+      traceId,
+      url: input.url
+    });
+    await recordEvent({
+      entityType: "generation_job",
+      entityId: job.id,
+      eventType: "generation_queued",
+      level: "info",
+      message: "Generation job queued for inline development processing.",
+      metadataJson: { queue: "inline-dev" },
+      requestId: input.requestId || null,
+      traceId
+    });
+    void runInlineDevelopmentGeneration(payload);
+    return job;
+  }
   const queue = generationQueue();
   const queued = await queue.add("generate_drop", payload, {
     jobId: job.id,
@@ -112,4 +125,47 @@ export async function enqueueGeneration(input: {
     traceId
   });
   return job;
+}
+
+async function runInlineDevelopmentGeneration(input: GenerationQueuePayload) {
+  try {
+    const { generateDropFromUrl } = await import("./generateDrop");
+    await updateGenerationJobStep(input.jobId, "INTAKE_CREATED");
+    await recordEvent({
+      entityType: "generation_job",
+      entityId: input.jobId,
+      eventType: "generation_worker_started",
+      level: "info",
+      message: "Inline development worker started processing queued job.",
+      metadataJson: { queue: "inline-dev", attempt: 1 },
+      requestId: null,
+      traceId: input.traceId
+    });
+    await generateDropFromUrl(input.url, {
+      jobId: input.jobId,
+      traceId: input.traceId
+    });
+    logger.info("queue.generation.inline_dev.completed", {
+      jobId: input.jobId,
+      traceId: input.traceId
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Generation failed.";
+    logger.error("queue.generation.inline_dev.failed", {
+      jobId: input.jobId,
+      traceId: input.traceId,
+      error: message
+    });
+    await updateGenerationJobStep(input.jobId, "FAILED", message);
+    await recordEvent({
+      entityType: "generation_job",
+      entityId: input.jobId,
+      eventType: "generation_worker_failed",
+      level: "error",
+      message,
+      metadataJson: { queue: "inline-dev", attemptsMade: 1 },
+      requestId: null,
+      traceId: input.traceId
+    });
+  }
 }

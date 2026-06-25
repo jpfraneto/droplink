@@ -1,11 +1,8 @@
 import Stripe from "stripe";
 import { loggedExternalCall } from "./logger";
-import { attachStripeSession, completeCheckoutSale, releaseCheckout, reserveEditionForRelic } from "./store";
+import { priceBookRelicPriceCents } from "./pricing";
+import { attachStripeSession, releaseCheckout, reserveEditionForRelic } from "./store";
 import type { Relic } from "./types";
-
-export function commissionCents(amountCents: number, commissionBps: number): number {
-  return Math.round((amountCents * commissionBps) / 10000);
-}
 
 export function stripeClient(): Stripe | null {
   const key = process.env.STRIPE_SECRET_KEY;
@@ -24,6 +21,8 @@ function appUrl(): string {
 
 export async function createRelicCheckoutSession(input: {
   relicId: string;
+  editionId?: string | null;
+  editionNumber?: number | null;
   baseUrl?: string;
   requestId?: string | null;
   traceId?: string | null;
@@ -31,27 +30,17 @@ export async function createRelicCheckoutSession(input: {
   const reserved = await reserveEditionForRelic(input);
   const relic = reserved.bundle.relics.find((entry) => entry.id === input.relicId) as Relic | undefined;
   if (!relic) throw new Error("Relic not found after reservation.");
+  const lockedPrice = priceBookRelicPriceCents(reserved.bundle.drop?.priceBookJson, relic.id);
+  if (!lockedPrice || reserved.bundle.drop?.priceBookJson?.status !== "locked") {
+    await releaseCheckout(reserved.checkout.id);
+    throw new Error("Locked price book is required for checkout.");
+  }
   const stripe = stripeClient();
-  const fee = commissionCents(relic.priceCents, reserved.bundle.storefront.commissionBps);
   const baseUrl = (input.baseUrl || appUrl()).replace(/\/$/, "");
 
   if (!stripe) {
-    if (process.env.NODE_ENV === "production" && process.env.ALLOW_MOCKS !== "true") {
-      await releaseCheckout(reserved.checkout.id);
-      throw new Error("STRIPE_SECRET_KEY is required for checkout.");
-    }
-    const mockSessionId = `mock_${reserved.checkout.id}`;
-    await attachStripeSession(reserved.checkout.id, mockSessionId);
-    await completeCheckoutSale({
-      stripeSessionId: mockSessionId,
-      stripePaymentIntentId: `mock_pi_${reserved.checkout.id}`,
-      customerEmail: "mock-buyer@droplink.local"
-    });
-    return {
-      url: `${baseUrl}/${reserved.bundle.storefront.slug}?success=mock&session_id=${mockSessionId}`,
-      checkoutId: reserved.checkout.id,
-      editionNumber: reserved.edition.editionNumber
-    };
+    await releaseCheckout(reserved.checkout.id);
+    throw new Error("STRIPE_SECRET_KEY is required for checkout.");
   }
 
   try {
@@ -80,7 +69,7 @@ export async function createRelicCheckoutSession(input: {
               quantity: 1,
               price_data: {
                 currency: relic.currency,
-                unit_amount: relic.priceCents,
+                unit_amount: lockedPrice,
                 product_data: {
                   name: relic.name,
                   description: relic.description,
@@ -90,20 +79,21 @@ export async function createRelicCheckoutSession(input: {
             }
           ],
           metadata: {
+            dropId: reserved.bundle.drop?.id || "",
+            relicId: relic.id,
+            editionId: reserved.edition.id,
+            editionNumber: String(reserved.edition.editionNumber),
+            priceBookId: reserved.bundle.drop?.id || "",
+            canonicalDomain: reserved.bundle.drop?.canonicalDomain || reserved.bundle.brand.hostname,
+            summonerWallet: reserved.bundle.drop?.summonerWallet || "",
+            payoutWallet: reserved.bundle.drop?.tempoWalletAddress || "",
             storefront_id: reserved.bundle.storefront.id,
             collection_id: reserved.checkout.collectionId,
             relic_id: relic.id,
             relic_edition_id: reserved.edition.id,
             checkout_session_id: reserved.checkout.id
           },
-          payment_intent_data: reserved.bundle.storefront.stripeConnectedAccountId
-            ? {
-                application_fee_amount: fee,
-                transfer_data: {
-                  destination: reserved.bundle.storefront.stripeConnectedAccountId
-                }
-              }
-            : undefined
+          payment_intent_data: undefined
         })
     );
     await attachStripeSession(reserved.checkout.id, session.id);

@@ -1,5 +1,5 @@
 export type ProductFamily =
-  | "premium tee"
+  | "heavyweight tee"
   | "heavyweight hoodie"
   | "windbreaker"
   | "laptop sleeve"

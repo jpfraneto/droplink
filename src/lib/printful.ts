@@ -47,6 +47,34 @@ type PrintfulRequestOptions = {
 };
 
 const CATALOG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const CATALOG_CACHE_VERSION = "2026-06-24";
+
+function devPlacement() {
+  return [{ placement: "front", technique: "dtg", layers: [{ type: "file" }] }];
+}
+
+function devCatalogProducts(): CatalogProduct[] {
+  return [
+    { id: 900001, name: "Dev Heavyweight T-Shirt", type: "shirt", raw: { placements: devPlacement() } },
+    { id: 900002, name: "Dev Fleece Hoodie", type: "hoodie", raw: { placements: devPlacement() } },
+    { id: 900003, name: "Dev Canvas Tote Bag", type: "tote bag", raw: { placements: devPlacement() } },
+    { id: 900004, name: "Dev Matte Poster", type: "poster print", raw: { placements: devPlacement() } },
+    { id: 900005, name: "Dev Structured Cap", type: "hat cap", raw: { placements: [{ placement: "front", technique: "embroidery", layers: [{ type: "file" }] }] } },
+    { id: 900006, name: "Dev Stainless Bottle", type: "drink bottle", raw: { placements: devPlacement() } }
+  ];
+}
+
+function devCatalogVariants(productId: number): CatalogVariant[] {
+  const variants: Record<number, CatalogVariant[]> = {
+    900001: [{ id: 990001, name: "Black / M", raw: { color: "Black", size: "M" } }],
+    900002: [{ id: 990002, name: "Black / M", raw: { color: "Black", size: "M" } }],
+    900003: [{ id: 990003, name: "Black / One size", raw: { color: "Black", size: "One size" } }],
+    900004: [{ id: 990004, name: "18x24", raw: { size: "18x24" } }],
+    900005: [{ id: 990005, name: "Black / One size", raw: { color: "Black", size: "One size" } }],
+    900006: [{ id: 990006, name: "Black / 24oz", raw: { color: "Black", size: "24oz" } }]
+  };
+  return variants[productId] || [{ id: 999999, name: "Black / M", raw: { color: "Black", size: "M" } }];
+}
 
 export function allowMocks(): boolean {
   return process.env.ALLOW_MOCKS === "true" || process.env.NODE_ENV !== "production";
@@ -80,6 +108,10 @@ function redactPrintfulError(body: unknown) {
   return json.length > 500 ? `${json.slice(0, 500)}...` : json;
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function printfulRequest<T = PrintfulJson>(path: string, options: PrintfulRequestOptions): Promise<T> {
   if (!process.env.PRINTFUL_API_KEY) throw new Error("PRINTFUL_API_KEY is required.");
   return loggedExternalCall(
@@ -101,6 +133,24 @@ async function printfulRequest<T = PrintfulJson>(path: string, options: Printful
         body: options.body ? JSON.stringify(options.body) : undefined
       });
       const json = (await response.json().catch(() => ({}))) as T;
+      if (response.status === 429) {
+        const retryAfter = Number(response.headers.get("retry-after") || 3);
+        await sleep(Math.min(Math.max(retryAfter, 3), 15) * 1000);
+        const retry = await fetch(apiPath(path), {
+          method: options.method || "GET",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${process.env.PRINTFUL_API_KEY}`,
+            "X-PF-Store-Id": String(process.env.PRINTFUL_STORE_ID || "")
+          },
+          body: options.body ? JSON.stringify(options.body) : undefined
+        });
+        const retryJson = (await retry.json().catch(() => ({}))) as T;
+        if (!retry.ok) {
+          throw new Error(`Printful ${options.operation} failed with ${retry.status}: ${redactPrintfulError(retryJson)}`);
+        }
+        return retryJson;
+      }
       if (!response.ok) {
         throw new Error(`Printful ${options.operation} failed with ${response.status}: ${redactPrintfulError(json)}`);
       }
@@ -147,6 +197,37 @@ function dataArray(json: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+function parseCatalogProducts(json: unknown): CatalogProduct[] {
+  return dataArray(json)
+    .map((entry) => {
+      const raw = (entry || {}) as PrintfulJson;
+      const id = numericId(raw);
+      if (!id) return null;
+      return {
+        id,
+        name: textValue(raw, ["name", "title"], `Printful product ${id}`),
+        type: textValue(raw, ["type", "product_type", "category"], ""),
+        raw
+      };
+    })
+    .filter(Boolean) as CatalogProduct[];
+}
+
+function parseCatalogVariants(json: unknown): CatalogVariant[] {
+  return dataArray(json)
+    .map((entry) => {
+      const raw = (entry || {}) as PrintfulJson;
+      const id = numericId(raw);
+      if (!id) return null;
+      return {
+        id,
+        name: textValue(raw, ["name", "title", "variant_name"], `Variant ${id}`),
+        raw
+      };
+    })
+    .filter(Boolean) as CatalogVariant[];
+}
+
 function numericId(input: unknown): number | null {
   const raw =
     typeof input === "object" && input
@@ -165,51 +246,46 @@ function textValue(input: PrintfulJson, keys: string[], fallback = "") {
 }
 
 export async function listCatalogProducts(input: { traceId?: string | null; requestId?: string | null } = {}): Promise<CatalogProduct[]> {
-  const json = await cachedPrintful("catalog-products:v2:front:worldwide", () =>
-    printfulRequest<PrintfulJson>("/v2/catalog-products?limit=100&offset=0&placements=front&selling_region_name=worldwide", {
+  if (!printfulConfigured() && allowMocks()) return devCatalogProducts();
+  const cacheKey = `catalog-products:v2:front:worldwide:${CATALOG_CACHE_VERSION}`;
+  const path = "/v2/catalog-products?limit=100&offset=0&placements=front&selling_region_name=worldwide";
+  const fetchProducts = () =>
+    printfulRequest<PrintfulJson>(path, {
       operation: "catalog_products.list",
       traceId: input.traceId,
       requestId: input.requestId
-    })
-  );
-  return dataArray(json)
-    .map((entry) => {
-      const raw = (entry || {}) as PrintfulJson;
-      const id = numericId(raw);
-      if (!id) return null;
-      return {
-        id,
-        name: textValue(raw, ["name", "title"], `Printful product ${id}`),
-        type: textValue(raw, ["type", "product_type", "category"], ""),
-        raw
-      };
-    })
-    .filter(Boolean) as CatalogProduct[];
+    });
+  const json = await cachedPrintful(cacheKey, fetchProducts);
+  let products = parseCatalogProducts(json);
+  if (!products.length) {
+    const fresh = await fetchProducts();
+    await setCachedJson(cacheKey, fresh);
+    products = parseCatalogProducts(fresh);
+  }
+  return products;
 }
 
 export async function listCatalogVariants(
   productId: number,
   input: { traceId?: string | null; requestId?: string | null } = {}
 ): Promise<CatalogVariant[]> {
-  const json = await cachedPrintful(`catalog-variants:v2:${productId}`, () =>
-    printfulRequest<PrintfulJson>(`/v2/catalog-products/${productId}/catalog-variants?limit=100&offset=0`, {
+  if (!printfulConfigured() && allowMocks()) return devCatalogVariants(productId);
+  const cacheKey = `catalog-variants:v2:${productId}:${CATALOG_CACHE_VERSION}`;
+  const path = `/v2/catalog-products/${productId}/catalog-variants?limit=100&offset=0`;
+  const fetchVariants = () =>
+    printfulRequest<PrintfulJson>(path, {
       operation: "catalog_variants.list",
       traceId: input.traceId,
       requestId: input.requestId
-    })
-  );
-  return dataArray(json)
-    .map((entry) => {
-      const raw = (entry || {}) as PrintfulJson;
-      const id = numericId(raw);
-      if (!id) return null;
-      return {
-        id,
-        name: textValue(raw, ["name", "title", "variant_name"], `Variant ${id}`),
-        raw
-      };
-    })
-    .filter(Boolean) as CatalogVariant[];
+    });
+  const json = await cachedPrintful(cacheKey, fetchVariants);
+  let variants = parseCatalogVariants(json);
+  if (!variants.length) {
+    const fresh = await fetchVariants();
+    await setCachedJson(cacheKey, fresh);
+    variants = parseCatalogVariants(fresh);
+  }
+  return variants;
 }
 
 async function listMockupStyles(
@@ -276,6 +352,31 @@ function retailPriceUsd(priceCents: number) {
   return (Math.max(priceCents, 1200) / 100).toFixed(2);
 }
 
+function placementSupportsFile(raw: PrintfulJson) {
+  const layers = raw.layers;
+  return Array.isArray(layers) && layers.some((layer) => (layer as PrintfulJson).type === "file");
+}
+
+export function choosePrintablePlacement(product: CatalogProduct): { placement: string; technique: string; reason: string } {
+  const placements = Array.isArray(product.raw.placements) ? (product.raw.placements as PrintfulJson[]) : [];
+  const filePlacements = placements.filter(placementSupportsFile);
+  const candidates = filePlacements.length ? filePlacements : placements;
+  const preferred =
+    candidates.find((entry) => entry.placement === "front" && entry.technique === "dtg") ||
+    candidates.find((entry) => entry.placement === "front" && entry.technique === "dtfilm") ||
+    candidates.find((entry) => entry.placement === "front") ||
+    candidates.find((entry) => entry.technique === "dtg") ||
+    candidates.find((entry) => entry.technique === "dtfilm") ||
+    candidates[0];
+  const placement = typeof preferred?.placement === "string" && preferred.placement ? preferred.placement : "front";
+  const technique = typeof preferred?.technique === "string" && preferred.technique ? preferred.technique : "dtg";
+  return {
+    placement,
+    technique,
+    reason: candidates.length ? `Printful placement ${placement}/${technique} is declared by the selected catalog product.` : "Printful placement metadata was missing; using front/dtg fallback."
+  };
+}
+
 export function buildRelicFulfillmentSpec(input: {
   concept: FulfillmentSelectionInput;
   selection: SelectedPrintfulVariant;
@@ -321,16 +422,51 @@ export async function selectPrintfulCatalogVariant(input: FulfillmentSelectionIn
     }
   }
   if (!best) throw new Error("Printful catalog returned no variants for candidate products.");
-  const productText = `${best.product.name} ${JSON.stringify(best.product.raw)}`.toLowerCase();
-  const technique = productText.includes("sublimation") ? "sublimation" : productText.includes("uv") ? "uv" : "dtg";
+  const printable = choosePrintablePlacement(best.product);
   return {
     product: best.product,
     variant: best.variant,
     productType: input.physicalArchetype || input.productFamily,
-    placement: "front",
-    technique,
-    selectionReason: `Selected dynamically from Printful catalog because ${best.product.name} matched ${terms.join(", ")} and ${best.variant.name} is one fixed purchasable variant.`
+    placement: printable.placement,
+    technique: printable.technique,
+    selectionReason: `Selected dynamically from Printful catalog because ${best.product.name} matched ${terms.join(", ")} and ${best.variant.name} is one fixed purchasable variant. ${printable.reason}`
   };
+}
+
+export async function printfulCatalogOptionsForPlanning(
+  input: { traceId?: string | null; requestId?: string | null } = {}
+): Promise<Array<{ key: string; name: string; type: string; placements: string[] }>> {
+  assertFulfillmentReady();
+  const products = await listCatalogProducts(input);
+  const priority = ["hoodie", "sweatshirt", "shirt", "tee", "t-shirt", "poster", "print", "tote", "bag", "hat", "cap", "sticker", "mug"];
+  const seen = new Set<string>();
+  return products
+    .map((product) => {
+      const haystack = `${product.name} ${product.type}`.toLowerCase();
+      const placements = Array.isArray(product.raw.placements)
+        ? (product.raw.placements as PrintfulJson[])
+            .map((entry) => String(entry.placement || ""))
+            .filter(Boolean)
+            .slice(0, 4)
+        : [];
+      const rank = priority.findIndex((term) => haystack.includes(term));
+      return {
+        key: product.name,
+        name: product.name,
+        type: product.type || "product",
+        placements: placements.length ? placements : ["front"],
+        rank: rank === -1 ? 999 : rank
+      };
+    })
+    .sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name))
+    .filter((entry) => {
+      const normalized = entry.name.toLowerCase();
+      if (seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    })
+    .slice(0, 24)
+    .map(({ rank: _rank, ...entry }) => entry);
 }
 
 export async function selectPrintfulFulfillmentSpec(input: FulfillmentSelectionInput & { printFileUrl: string; printFileSha256: string }) {

@@ -4,11 +4,11 @@ import { hasGenerationAccess } from "@/lib/adminAuth";
 import { logger } from "@/lib/logger";
 import { enqueueGeneration } from "@/lib/queues";
 import { redirectTo } from "@/lib/redirects";
+import { brandSlugFromUrl } from "@/lib/slugs";
+import { withDefaultHttpsScheme } from "@/lib/urls";
 
 const schema = z.object({
-  url: z.string().min(8),
-  tier: z.enum(["free", "atelier"]).default("free"),
-  type: z.enum(["genesis", "weekly"]).default("genesis")
+  url: z.string().min(8)
 });
 
 export async function POST(request: Request) {
@@ -24,8 +24,6 @@ export async function POST(request: Request) {
   try {
     const job = await enqueueGeneration({
       url: body.url,
-      tier: body.tier,
-      type: body.type,
       requestId: request.headers.get("x-request-id")
     });
     logger.info("admin.generate.queued", {
@@ -34,7 +32,8 @@ export async function POST(request: Request) {
       url: body.url
     });
     if (contentType.includes("application/json")) return NextResponse.json({ jobId: job.id, traceId: job.traceId });
-    return redirectTo(request, `/jobs/${job.id}`);
+    const expectedSlug = brandSlugFromUrl(withDefaultHttpsScheme(body.url));
+    return redirectTo(request, `/admin/${expectedSlug}?job=${job.id}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Generation failed.";
     logger.error("admin.generate.failed", { error: message, url: body.url });

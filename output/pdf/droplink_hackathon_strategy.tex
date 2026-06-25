@@ -1,0 +1,633 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=0.8in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{tcolorbox}
+
+\definecolor{ink}{HTML}{151515}
+\definecolor{muted}{HTML}{5B626A}
+\definecolor{accent}{HTML}{0E7C86}
+\definecolor{warm}{HTML}{B84A2B}
+\definecolor{panel}{HTML}{F5F7F7}
+\definecolor{line}{HTML}{D9E1E2}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=accent,
+  urlcolor=accent,
+  citecolor=accent,
+  pdftitle={DropLink Hackathon Strategy Review},
+  pdfauthor={DropLink}
+}
+
+\pagestyle{fancy}
+\setlength{\headheight}{24pt}
+\fancyhf{}
+\lhead{\textcolor{muted}{DropLink Strategy Review}}
+\rhead{\textcolor{muted}{Hermes Agent Hackathon}}
+\cfoot{\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{line}\leaders\hrule height \headrulewidth\hfill}}
+
+\titleformat{\section}{\Large\bfseries\color{ink}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries\color{ink}}{\thesubsection}{0.6em}{}
+\setlist[itemize]{leftmargin=1.2em, itemsep=0.25em, topsep=0.25em}
+\setlist[enumerate]{leftmargin=1.4em, itemsep=0.25em, topsep=0.25em}
+\renewcommand{\arraystretch}{1.18}
+
+\newcommand{\signalbox}[2]{
+  \begin{tcolorbox}[colback=panel,colframe=line,arc=2mm,boxrule=0.4pt,left=8pt,right=8pt,top=7pt,bottom=7pt]
+  \textbf{#1}\par
+  #2
+  \end{tcolorbox}
+}
+
+\begin{document}
+\pagenumbering{gobble}
+
+\begin{titlepage}
+  \vspace*{0.8in}
+  {\Huge \bfseries DropLink\par}
+  \vspace{0.18in}
+  {\Large A strategic review for the Hermes Agent Accelerated Business Hackathon\par}
+  \vspace{0.35in}
+  {\large Prepared June 2026\par}
+  \vfill
+  \signalbox{One sentence thesis}{
+    DropLink should be presented as an agent-run storefront operator: paste a project link, let the agent study the project, generate a scarce 3-product storefront, take payment through Stripe, and route fulfillment through Printful.
+  }
+  \vspace{0.2in}
+  \signalbox{Viral wedge}{
+    The public loop is not ``AI merch.'' It is: ``drop your project link and watch an agent turn your internet identity into three scarce products your community can claim.''
+  }
+  \vfill
+  \textcolor{muted}{Research boundary: TikTok was checked through the in-app browser, but no logged-in account state was available and TikTok search returned a server error. This review uses public sources, the local DropLink repository, and current public market signals.}
+\end{titlepage}
+
+\pagenumbering{roman}
+\tableofcontents
+\newpage
+\pagenumbering{arabic}
+
+\section{Executive Summary}
+
+DropLink is already much more coherent than a generic hackathon app. The codebase has a sharp invariant: a public URL becomes a storefront, a genesis drop has exactly 3 products, each product has 8 editions, Stripe handles payment, Printful handles fulfillment, and DropLink owns the scarcity ledger. That matters because the hackathon is explicitly about agents that can earn, spend, and run real operations at scale. DropLink can plausibly show all three:
+
+\begin{itemize}
+  \item \textbf{Earn:} checkout revenue, 8 percent commission on free drops, and a future \(\$88\)/month Atelier tier.
+  \item \textbf{Spend:} downstream fulfillment spend through Printful after payment succeeds.
+  \item \textbf{Operate:} crawl a URL, distill brand identity, generate product concepts, create print assets and mockups, publish a storefront, reserve inventory, handle payment webhooks, and trigger fulfillment.
+\end{itemize}
+
+The strongest submission angle is \textbf{agentic commerce for internet-native projects}. The weakest angle is \textbf{instant AI merch}. The phrase ``AI merch'' invites comparison to saturated print-on-demand tools, low-quality generated assets, and IP-risky logo slapping. The phrase ``agent-run storefront'' fits the hackathon, the current agentic-commerce wave, and the implementation.
+
+The core recommendation is to build the demo and launch story around a public social loop:
+
+\begin{enumerate}
+  \item A founder, creator, or builder posts a project URL.
+  \item DropLink replies with a generated storefront containing exactly 3 scarce products.
+  \item The storefront shows an OG image, product mockups, scarcity counters, and one-click Stripe checkout.
+  \item The brand owner can claim the page with DNS TXT.
+  \item Purchases prove demand; the best drops graduate to weekly Atelier drops.
+\end{enumerate}
+
+This gives the judges a useful business tool, a viable monetization path, and a presentation that is easy to understand in under three minutes.
+
+\section{Where DropLink Stands Today}
+
+\subsection{Product Definition}
+
+DropLink turns a public brand URL into a limited storefront. In the current repo language, it is a ``cosmic atelier with a warehouse integration.'' That phrase has taste, but the public pitch should be clearer:
+
+\begin{quote}
+  DropLink is an agent that studies a project link and launches a scarce storefront for that project: 3 products, 8 units each, paid through Stripe, fulfilled through Printful.
+\end{quote}
+
+The codebase already encodes important constraints:
+
+\begin{itemize}
+  \item Public storefront URLs are canonicalized as \texttt{/\{brandSlug\}}.
+  \item Free genesis drops produce exactly 3 products.
+  \item Premium weekly drops produce exactly 8 products.
+  \item Every product has one fixed variant and exactly 8 editions.
+  \item Checkout buys exactly one edition of one product.
+  \item DropLink owns inventory scarcity and the ledger.
+  \item Stripe is payment only; Printful is fulfillment only.
+  \item There is no cart, quantity picker, size picker, or color picker.
+\end{itemize}
+
+This is a strength. Simplicity is a feature here. A storefront with only 3 products and 24 total available units is easier to explain, easier to buy from, easier to share, and easier to verify than a full commerce platform.
+
+\subsection{Technical Readiness}
+
+The local project review found a working Next.js app with Stripe, Printful, Drizzle/Postgres, URL scraping, AI brand study/planning, generated OG assets, admin review, DNS claim, public storefronts, scarcity reservations, checkout webhooks, and fulfillment records. Current validation results:
+
+\begin{itemize}
+  \item \texttt{bun test}: 9 passing tests, 0 failures.
+  \item \texttt{bun run check}: TypeScript passes with \texttt{tsc --noEmit}.
+\end{itemize}
+
+The tested areas match the critical product promises: slug generation, unsafe URL rejection, fixed product counts, edition reservations, sold-out behavior, expired checkout release, webhook sale accounting, premium/free commission rules, and DNS TXT claim parsing.
+
+\subsection{Current Gaps}
+
+The main gaps are not conceptual. They are proof, operations, and trust:
+
+\begin{itemize}
+  \item Real Printful account/catalog verification is still a launch risk.
+  \item Generated artwork falls back to conservative mocks unless the image provider is configured.
+  \item Stripe subscriptions and Connect are represented but not fully wired as owner billing/onboarding.
+  \item The public flow is still gated through admin generation rather than fully open self-serve intake.
+  \item The claim flow is good, but the user story needs a stronger explanation: why a brand owner would claim, approve, and keep using DropLink.
+\end{itemize}
+
+For the hackathon, this is acceptable if the demo shows the working operational loop and honestly frames what is live versus next.
+
+\section{Current Internet Signals}
+
+\subsection{TikTok: Real Process Beats Polished Perfection}
+
+TikTok's 2026 trend report describes the year under the theme ``Irreplaceable Instinct.'' The most relevant signal for DropLink is that audiences want grounding, honesty, community, and behind-the-scenes process rather than overly polished brand output. TikTok says that in 2026 people come for unfiltered stories and BTS moments, and the best brands show real process and people over curated perfection.
+
+This matters because DropLink should not hide the agent. The agent should be part of the show:
+
+\begin{itemize}
+  \item Show the pasted URL.
+  \item Show the agent reading the site.
+  \item Show the three product concepts being created.
+  \item Show the storefront appearing.
+  \item Show the first checkout or a mocked test checkout.
+\end{itemize}
+
+The viral asset is the transformation, not only the final store.
+
+\subsection{TikTok: Curiosity Detours}
+
+TikTok also emphasizes ``Curiosity Detours'': audiences arrive with intent and then wander through search, comments, and niche communities. This is directly aligned with DropLink. A user might arrive because they know one startup, but the product should invite them to explore many adjacent projects.
+
+The homepage already has a ``Latest droplinks'' feed. That feed should become a public curiosity surface:
+
+\begin{itemize}
+  \item ``Latest links turned into drops.''
+  \item ``Most claimed this week.''
+  \item ``Projects waiting for owner claim.''
+  \item ``Comment a project we should drop next.''
+\end{itemize}
+
+The strongest viral behavior is not only purchasing. It is nominating links, debating whether the generated products captured the project, and tagging founders to claim their storefront.
+
+\subsection{TikTok: Emotional ROI}
+
+TikTok's ``Emotional ROI'' signal says impulse loses to intention in 2026. Shoppers need a clear ``why to buy'' built from payoff, relevance, and community connection. This is a warning against generic shirts and mugs. Scarcity alone is not enough. Each DropLink product needs a reason to exist.
+
+DropLink's current data model already has \texttt{whyThisExists}. This should be elevated in the UI and demo:
+
+\begin{itemize}
+  \item Every product should answer: ``what belief does this let me wear or keep?''
+  \item Each product should feel like an artifact of a community, not a logo on a blank.
+  \item Comments, testimonials, and founder reactions should be treated as part of the storefront evidence.
+\end{itemize}
+
+\subsection{Agentic Commerce Is Becoming Real Infrastructure}
+
+Stripe's Agentic Commerce Suite lets sellers make products discoverable to agents, keep product, inventory, and pricing feeds current, and accept agentic payments across multiple commerce protocols. Stripe also documents agentic checkout, product feed, order approval hooks, webhooks, and shared payment token concepts.
+
+This is useful context for the submission. DropLink should not pretend to be separate from agentic commerce. It should position itself as a storefront generator that can become agent-readable:
+
+\begin{itemize}
+  \item Today: Stripe Checkout for humans.
+  \item Next: Stripe Agentic Commerce feed for AI buyers and chat agents.
+  \item Later: agent approval hooks that check DropLink's edition ledger before payment.
+\end{itemize}
+
+\subsection{Hermes, NVIDIA, and Operational Agents}
+
+The hackathon sponsors are pushing agents that operate across tools. The Hermes optional skills catalog includes payment-related skills such as Stripe Link and Stripe Projects. NVIDIA's Hermes/NemoClaw material emphasizes agents operating over public and private data in a security-approved runtime, and Nemotron 3 Ultra is framed around long-running agent workflows.
+
+DropLink can fit this sponsor thesis if the demo emphasizes operations:
+
+\begin{itemize}
+  \item The agent does research, not just generation.
+  \item The agent creates structured plans, not just prose.
+  \item The agent triggers commerce and fulfillment, not just a landing page.
+  \item The agent records events, status, and admin review checkpoints.
+\end{itemize}
+
+\subsection{Print-On-Demand Infrastructure Is Mature, But Generic POD Is Saturated}
+
+Printful's own API positioning supports automated fulfillment, order submission, mockup generation, and no-inventory production. That infrastructure makes DropLink viable. It also means the market has many low-effort merch tools. DropLink must avoid looking like another prompt-to-shirt product.
+
+The durable wedge is curation and scarcity:
+
+\begin{itemize}
+  \item Only 3 products, not infinite SKUs.
+  \item 8 editions each, not endless supply.
+  \item One variant, not decision-heavy shopping.
+  \item Public provenance from a URL.
+  \item Founder/community claim flow.
+\end{itemize}
+
+\section{SWOT Analysis}
+
+\begin{longtable}{p{0.22\textwidth}p{0.72\textwidth}}
+\toprule
+\textbf{Category} & \textbf{Analysis} \\
+\midrule
+\endhead
+
+\textbf{Strengths} &
+\begin{itemize}
+  \item Simple and memorable loop: paste link, get 3 products.
+  \item Strong scarcity mechanic: 3 products times 8 editions equals 24 possible sales.
+  \item Real operational stack: URL crawl, AI distillation, product planning, assets, OG, Stripe, ledger, Printful.
+  \item Hackathon fit: demonstrates an agent earning, spending, and operating.
+  \item Public sharing surface: every generated storefront is a linkable artifact.
+  \item DNS claim creates a path from playful public generation to legitimate brand ownership.
+  \item Tests cover key invariants and checkout/edition behavior.
+\end{itemize}
+\\
+
+\textbf{Weaknesses} &
+\begin{itemize}
+  \item ``AI merch'' can sound cheap, saturated, or IP-risky.
+  \item Artwork quality and Printful readiness need visible proof in the demo.
+  \item Public users cannot safely trigger full generation at scale yet; admin curation is necessary.
+  \item The product currently needs a stronger public evidence layer: founder reactions, buyer comments, claim badges, and social proof.
+  \item Premium tier is conceptually strong but not fully wired end-to-end.
+  \item Generated products may miss the brand soul unless prompts, validation, and review are tight.
+\end{itemize}
+\\
+
+\textbf{Opportunities} &
+\begin{itemize}
+  \item Ride the agentic commerce wave with Stripe and Hermes language.
+  \item Use TikTok/X comments as lead generation: ``drop your project link.''
+  \item Target hackathon/startup/fandom communities where identity and public proof matter.
+  \item Build a public feed of generated storefronts as a discovery engine.
+  \item Convert high-signal free drops into \(\$88\)/month weekly Atelier customers.
+  \item Add Stripe Agentic Commerce catalog feed support so generated products can be bought by agents.
+  \item Become infrastructure for launches, hackathons, Discord communities, open-source projects, and creator products.
+\end{itemize}
+\\
+
+\textbf{Threats} &
+\begin{itemize}
+  \item AI content backlash: people reject synthetic, soulless, undisclosed creative.
+  \item Trademark and brand-permission risk if products look like counterfeit official merch.
+  \item POD competition from Shopify apps, Printful-native tools, Etsy sellers, Amazon custom merch, and AI design tools.
+  \item Fulfillment failures can damage trust quickly.
+  \item Payments, tax, shipping, refunds, and chargebacks become serious once volume grows.
+  \item Viral traffic can create cost spikes if generation is open and uncapped.
+\end{itemize}
+\\
+\bottomrule
+\end{longtable}
+
+\section{PESTEL Snapshot}
+
+\begin{longtable}{p{0.18\textwidth}p{0.76\textwidth}}
+\toprule
+\textbf{Factor} & \textbf{Implication for DropLink} \\
+\midrule
+\endhead
+\textbf{Political} & Cross-border commerce, platform moderation, and AI disclosure rules can affect public ads and generated assets. Start with US-centered fulfillment and clear AI-use disclosure. \\
+\textbf{Economic} & Consumers are more intentional with purchases. The product must justify emotional value, not just novelty. Scarcity plus meaning is the economic argument. \\
+\textbf{Social} & Builders, fandoms, and niche communities want identity artifacts. DropLink should focus on communities with visible belonging and inside language. \\
+\textbf{Technological} & Agentic commerce, Stripe feeds, AI image generation, and POD APIs are mature enough to connect. Differentiation comes from orchestration and taste. \\
+\textbf{Environmental} & On-demand production avoids unsold inventory, but shipping and returns remain concerns. Limited editions and no inventory should be part of the sustainability story. \\
+\textbf{Legal} & The main risks are trademark, copyright, likeness, tax, refunds, and brand ownership. DNS claim, admin review, and logo-avoidant design rules are essential. \\
+\bottomrule
+\end{longtable}
+
+\section{Competitive Positioning}
+
+\subsection{The Bad Category: AI Merch Generator}
+
+If DropLink is framed as ``AI merch from any URL,'' it will be judged against cheap prompt-to-shirt tools. That category has weak trust:
+
+\begin{itemize}
+  \item Infinite products feel generic.
+  \item AI art often looks disposable.
+  \item Logo usage creates IP risk.
+  \item Users assume fulfillment and support are brittle.
+\end{itemize}
+
+\subsection{The Better Category: Agent-Run Storefront Operator}
+
+DropLink should instead define a new wedge:
+
+\begin{quote}
+  An agent that opens a tiny storefront for any internet project, tests community demand with 24 scarce units, then graduates winners into weekly drops.
+\end{quote}
+
+This makes the product useful even before it becomes huge. A founder can test whether their community would buy. A hackathon team can create a launch artifact. A Discord can commemorate a moment. An open-source project can create supporter products without managing inventory.
+
+\subsection{Positioning Matrix}
+
+\begin{longtable}{p{0.25\textwidth}p{0.20\textwidth}p{0.20\textwidth}p{0.25\textwidth}}
+\toprule
+\textbf{Alternative} & \textbf{Speed} & \textbf{Operational depth} & \textbf{DropLink advantage} \\
+\midrule
+\endhead
+Shopify + POD app & Medium & High & DropLink is dramatically simpler for a 3-product campaign. \\
+Printful manual store & Medium & Medium & DropLink automates brand study, product plan, scarcity, and storefront creation. \\
+AI image-to-shirt tools & High & Low & DropLink includes checkout, editions, admin review, claim, and fulfillment routing. \\
+Etsy/Redbubble & Low to medium & Medium & DropLink creates a branded project-specific URL and scarcity narrative. \\
+Custom merch agency & Low & High & DropLink can run a low-cost validation drop before an agency spend. \\
+\bottomrule
+\end{longtable}
+
+\section{Viral Loop}
+
+\subsection{The Loop}
+
+\begin{enumerate}
+  \item \textbf{Prompt:} ``Reply with your project link. I will DropLink it.''
+  \item \textbf{Selection:} Admin chooses links from comments, X replies, Discord, or hackathon submissions.
+  \item \textbf{Generation:} Agent studies the URL and creates a 3-product scarce storefront.
+  \item \textbf{Reply:} DropLink posts the storefront back to the person/community.
+  \item \textbf{Debate:} Comments judge whether the products captured the project.
+  \item \textbf{Claim:} Founder claims the page with DNS TXT.
+  \item \textbf{Purchase:} Fans buy one of 24 total editions.
+  \item \textbf{Proof:} Sold counts, buyer posts, and founder reactions feed the next content cycle.
+\end{enumerate}
+
+\subsection{Why It Can Spread}
+
+The loop has three shareable hooks:
+
+\begin{itemize}
+  \item \textbf{Identity:} People like seeing their project interpreted.
+  \item \textbf{Taste judgment:} People argue whether the agent ``got it right.''
+  \item \textbf{Scarcity:} Only 24 total products exist in the genesis drop.
+\end{itemize}
+
+This is better than a pure purchase loop because people can participate even if they do not buy.
+
+\subsection{Recommended Content Formats}
+
+\begin{longtable}{p{0.24\textwidth}p{0.34\textwidth}p{0.32\textwidth}}
+\toprule
+\textbf{Format} & \textbf{Execution} & \textbf{Why it works} \\
+\midrule
+\endhead
+Paste-to-store timelapse & Screen record URL paste, agent steps, storefront result. & Makes the agentic operation visible and satisfying. \\
+Founder reaction & Send the generated drop to the founder and capture response. & Creates human proof and authenticity. \\
+Comment nomination & ``Drop a link. Best one gets a storefront today.'' & Turns comments into intake. \\
+Three-product reveal & Reveal product 1, 2, 3 with why each exists. & Fits short-form pacing and makes curation visible. \\
+Sold-count update & ``This project sold 9 of 24 in 2 hours.'' & Converts activity into social proof. \\
+Before/after & Before: public site. After: scarce storefront. & Clean visual transformation. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Copy Angles}
+
+\begin{itemize}
+  \item ``I pasted a startup URL into an agent. It launched a real storefront.''
+  \item ``Your project has fans before it has merch. DropLink tests that in 24 units.''
+  \item ``Not a Shopify store. A 3-product proof-of-fandom drop.''
+  \item ``Agents should not just write copy. They should operate revenue.''
+  \item ``Comment your project link. I will turn one into a live storefront.''
+\end{itemize}
+
+\section{Hackathon Fit}
+
+\subsection{Usefulness}
+
+DropLink helps builders, creators, and communities validate demand without inventory, store setup, design coordination, or fulfillment operations. It compresses a multi-tool workflow into a single agentic action.
+
+The useful job-to-be-done:
+
+\begin{quote}
+  ``I have a project with an audience. I want to know whether that audience will financially support it, without spending weeks setting up merch.''
+\end{quote}
+
+\subsection{Viability}
+
+The business model is credible:
+
+\begin{itemize}
+  \item Free genesis drops can take 8 percent commission.
+  \item Premium Atelier can charge \(\$88\)/month for weekly drops and 0 percent commission.
+  \item Fulfillment is variable-cost through Printful.
+  \item No inventory is held.
+  \item Scarcity caps operational exposure per free drop.
+\end{itemize}
+
+The current repo already has the right foundations: database-backed scarcity, Stripe checkout, Printful encapsulation, admin review, generation logs, and claim flow.
+
+\subsection{Presentation}
+
+The demo should be concrete and operational. Recommended 1-3 minute structure:
+
+\begin{enumerate}
+  \item \textbf{0:00-0:15:} State the problem: builders have audiences but setting up commerce is slow.
+  \item \textbf{0:15-0:35:} Paste a real public project URL into DropLink admin.
+  \item \textbf{0:35-1:05:} Show the agent pipeline: crawl, brand study, product plan, mockups, OG, editions.
+  \item \textbf{1:05-1:35:} Open the public storefront with 3 products and scarcity counters.
+  \item \textbf{1:35-2:05:} Start checkout and show Stripe session or test completion.
+  \item \textbf{2:05-2:30:} Show ledger/order/fulfillment event.
+  \item \textbf{2:30-3:00:} Close with business model and evolution: genesis drops to weekly Atelier, agent-readable commerce feeds next.
+\end{enumerate}
+
+\section{Product Recommendations}
+
+\subsection{Keep the 3-Product Constraint}
+
+Do not expand the free product count. The 3-product rule is the product. It creates:
+
+\begin{itemize}
+  \item a better reveal,
+  \item easier choice,
+  \item lower generation cost,
+  \item stronger curation,
+  \item more credible scarcity.
+\end{itemize}
+
+\subsection{Make ``Why This Exists'' First-Class}
+
+Each card should visibly include one concise reason the product exists. The buyer should understand the belief or inside joke before the price. This directly addresses TikTok's Emotional ROI signal.
+
+\subsection{Show Provenance}
+
+Every storefront should show:
+
+\begin{itemize}
+  \item source URL,
+  \item generated timestamp,
+  \item claim status,
+  \item edition count,
+  \item whether fulfillment is live or preview.
+\end{itemize}
+
+This creates trust and turns AI generation from a hidden liability into a transparent process.
+
+\subsection{Add a Public Nomination Surface}
+
+The homepage should eventually let visitors nominate URLs without triggering expensive generation. A low-risk version:
+
+\begin{itemize}
+  \item collect URL and optional email/social handle,
+  \item rate-limit,
+  \item store as nomination,
+  \item admin selects winners,
+  \item public feed says ``nominated'' versus ``generated.''
+\end{itemize}
+
+\subsection{Add Claim-Owner Upgrade Path}
+
+Once a brand owner claims a page, the obvious next actions are:
+
+\begin{itemize}
+  \item approve/reject generated products,
+  \item request one regeneration,
+  \item connect Stripe account,
+  \item upgrade to weekly Atelier,
+  \item publish a founder note on the storefront.
+\end{itemize}
+
+\subsection{Make the OG Image a Growth Asset}
+
+The OG image should be optimized as a social card, not just metadata. It should carry:
+
+\begin{itemize}
+  \item brand name,
+  \item 3 product silhouettes or thumbnails,
+  \item ``3 products, 8 units each,''
+  \item source domain,
+  \item DropLink mark.
+\end{itemize}
+
+\section{Operational Risks and Mitigations}
+
+\begin{longtable}{p{0.26\textwidth}p{0.34\textwidth}p{0.30\textwidth}}
+\toprule
+\textbf{Risk} & \textbf{Failure mode} & \textbf{Mitigation} \\
+\midrule
+\endhead
+IP misuse & Products look like unauthorized official merchandise. & Avoid exact logos by default, require admin review, include claim and takedown process. \\
+Low-quality AI art & Storefront looks like AI slop. & Use stronger art direction, brand motifs, human review, and transparent ``generated from'' provenance. \\
+Fulfillment mismatch & Generated print file does not fit product constraints. & Validate print files, restrict catalog, verify Printful account variants before live orders. \\
+Checkout race conditions & More units sell than available. & Keep database-led reservation with transaction locking and webhook reconciliation. \\
+Generation cost spike & Viral nomination drives expensive runs. & Keep admin curation, queues, rate limits, and nomination-only public intake. \\
+Brand owner backlash & Founder dislikes public generated storefront. & Keep draft status until reviewed; if public experimentation is used, add clear unofficial label and takedown route. \\
+Trust gap & Buyers wonder if product will ship. & Show fulfillment status, policy links, Stripe checkout, order receipt, and support contact. \\
+\bottomrule
+\end{longtable}
+
+\section{Metrics}
+
+\subsection{Hackathon Demo Metrics}
+
+\begin{itemize}
+  \item Time from URL submission to ready-for-review storefront.
+  \item Number of generated products: exactly 3.
+  \item Number of editions created: exactly 24.
+  \item Checkout session creation success.
+  \item Webhook sale and ledger write success.
+  \item Fulfillment record or Printful draft order creation.
+\end{itemize}
+
+\subsection{Launch Metrics}
+
+\begin{itemize}
+  \item URL nominations per post.
+  \item Generation completion rate.
+  \item Founder claim rate.
+  \item Storefront share rate.
+  \item Product page click-through rate.
+  \item Checkout conversion rate.
+  \item Units claimed per storefront.
+  \item Free-to-Atelier upgrade rate.
+\end{itemize}
+
+\subsection{Quality Metrics}
+
+\begin{itemize}
+  \item Admin approval rate for first generated plan.
+  \item Regeneration rate.
+  \item Product mockup readiness rate.
+  \item Refund/chargeback rate.
+  \item Fulfillment error rate.
+  \item Time to publish after generation.
+\end{itemize}
+
+\section{Roadmap}
+
+\subsection{Before Submission}
+
+\begin{enumerate}
+  \item Generate 2-3 polished example storefronts from recognizable but safe public projects.
+  \item Verify one end-to-end checkout in test mode and show the webhook/ledger.
+  \item Show a Printful draft/mockup path, even if live fulfillment remains gated.
+  \item Tighten demo language around ``agent-run storefront,'' not ``AI merch.''
+  \item Prepare one tweet with a 1-3 minute video and one short writeup.
+\end{enumerate}
+
+\subsection{After Hackathon}
+
+\begin{enumerate}
+  \item Public nomination queue.
+  \item Founder claim dashboard.
+  \item Owner approval and one-click publish.
+  \item Stripe Connect onboarding for claimed storefronts.
+  \item Atelier subscription checkout.
+  \item Weekly drop scheduler.
+  \item Stripe Agentic Commerce product/inventory feed export.
+  \item Comment/social ingestion so the agent learns community language before generating.
+\end{enumerate}
+
+\subsection{Longer-Term Evolution}
+
+DropLink can evolve from a merch storefront tool into an \textbf{agentic micro-commerce network}. The long-term product is not only ``make products.'' It is:
+
+\begin{quote}
+  An agent that watches cultural demand around projects, proposes limited drops, gets owner approval, publishes storefronts, sells scarce editions, pays vendors, and reports what worked.
+\end{quote}
+
+That is much closer to an autonomous company function than a design generator. It can serve startups, creators, events, open-source projects, hackathons, local businesses, and fandoms.
+
+\section{Recommended Submission Narrative}
+
+\subsection{Short Writeup}
+
+\begin{quote}
+  DropLink is an agent-run storefront operator for internet projects. Paste a public project URL and the agent studies the brand, distills it into exactly 3 scarce products, creates 8 editions of each, publishes a storefront, takes payment through Stripe, and routes fulfillment through Printful. It is built for builders and communities who want to test demand without inventory or commerce setup. Free genesis drops monetize through an 8 percent commission; claimed Atelier storefronts can upgrade to weekly drops.
+\end{quote}
+
+\subsection{Judges' Takeaway}
+
+The desired judge reaction:
+
+\begin{quote}
+  ``This is not another wrapper. It is a small business operation compressed into an agent: research, product creation, storefront, payment, inventory, fulfillment, and owner claim.''
+\end{quote}
+
+\section{Source Notes}
+
+\begin{itemize}
+  \item \href{https://ads.tiktok.com/business/en-US/next}{TikTok For Business, ``TikTok Next 2026 Trend Report''}, especially Reali-Tea, Curiosity Detours, and Emotional ROI.
+  \item \href{https://ads.tiktok.com/creative/creativeCenter}{TikTok One Creative Suite and Creative Center}.
+  \item \href{https://docs.stripe.com/agentic-commerce/for-sellers}{Stripe Agentic Commerce Suite for sellers}.
+  \item \href{https://docs.stripe.com/agentic-commerce/acp}{Stripe Agentic Commerce Protocol}.
+  \item \href{https://docs.stripe.com/payments/checkout}{Stripe Checkout documentation} and \href{https://docs.stripe.com/api/checkout/sessions}{Checkout Sessions API}.
+  \item \href{https://hermes-agent.nousresearch.com/docs/reference/optional-skills-catalog}{Hermes Agent optional skills catalog}.
+  \item \href{https://developer.nvidia.com/blog/nvidia-nemotron-3-ultra-powers-faster-more-efficient-reasoning-for-long-running-agents/}{NVIDIA, ``NVIDIA Nemotron 3 Ultra Powers Faster, More Efficient Reasoning for Long-Running Agents.''}
+  \item \href{https://developer.nvidia.com/blog/deploy-self-evolving-agents-for-faster-more-secure-research-with-a-hermes-agent-and-nvidia-nemoclaw/}{NVIDIA, ``Deploy Self-Evolving Agents for Faster, More Secure Research with a Hermes Agent and NVIDIA NemoClaw.''}
+  \item \href{https://www.printful.com/api}{Printful API} and \href{https://www.printful.com/mockup-generator}{Printful mockup tooling}.
+  \item \href{https://www.deloitte.com/us/en/insights/industry/technology/digital-media-trends-consumption-habits-survey.html}{Deloitte, ``2026 Digital Media Trends: Capturing always-on fandom between releases and seasons.''}
+  \item \href{https://www.socialnative.com/articles/2026-creator-commerce-report/}{Social Native, ``2026 Creator Commerce Report'' announcement}.
+\end{itemize}
+
+\end{document}

@@ -2,8 +2,8 @@ import { z } from "zod";
 import { loggedExternalCall } from "./logger";
 import type { BrandStudyJson, RelicPlanJson } from "./types";
 
-export const BRAND_STUDY_PROMPT_VERSION = "brand-study-v1";
-export const RELIC_PLAN_PROMPT_VERSION = "relic-plan-v1";
+export const BRAND_STUDY_PROMPT_VERSION = "brand-study-2026-06";
+export const RELIC_PLAN_PROMPT_VERSION = "relic-plan-2026-06";
 
 const brandStudySchema = z.object({
   brand_name: z.string().min(1),
@@ -59,7 +59,8 @@ export async function studyBrand(input: {
   traceId: string;
   requestId?: string | null;
 }): Promise<{ study: BrandStudyJson; modelVersion: string }> {
-  if (process.env.AI_PROVIDER === "openai" && process.env.OPENAI_API_KEY) {
+  const provider = process.env.AI_PROVIDER || (process.env.OPENAI_API_KEY ? "openai" : "mock");
+  if (provider === "openai" && process.env.OPENAI_API_KEY) {
     return loggedExternalCall(
       { provider: "openai", operation: "brand_study", traceId: input.traceId, requestId: input.requestId },
       async () => {
@@ -69,7 +70,7 @@ export async function studyBrand(input: {
           schemaName: "droplink_brand_study",
           schema: brandStudyJsonSchema(),
           prompt: [
-            "You are the artifact of a cosmic atelier that came to earth to distill the core essence of the coolest brands humans have created.",
+            "You are Hermes, the DropLink agent that distills one public URL into finite physical relics.",
             "Study this public brand URL and output only JSON. Do not invent private facts. Do not create products.",
             `URL: ${input.url}`,
             `Domain: ${input.domain}`,
@@ -87,26 +88,39 @@ export async function studyBrand(input: {
 
 export async function planRelics(input: {
   study: BrandStudyJson;
-  relicCount: 3 | 8;
-  collectionType: "genesis" | "weekly";
+  relicCount: 3;
+  collectionType: "drop";
+  printfulCatalogOptions?: Array<{ key: string; name: string; type: string; placements: string[] }>;
   traceId: string;
   requestId?: string | null;
 }): Promise<{ plan: RelicPlanJson; modelVersion: string }> {
-  if (process.env.AI_PROVIDER === "openai" && process.env.OPENAI_API_KEY) {
+  const provider = process.env.AI_PROVIDER || (process.env.OPENAI_API_KEY ? "openai" : "mock");
+  if (provider === "openai" && process.env.OPENAI_API_KEY) {
     return loggedExternalCall(
       { provider: "openai", operation: "relic_plan", traceId: input.traceId, requestId: input.requestId },
       async () => {
         const model = process.env.OPENAI_MODEL || "gpt-5.5";
+        const catalogOptions = input.printfulCatalogOptions?.length
+          ? input.printfulCatalogOptions
+          : [
+              { key: "heavyweight tee", name: "Heavyweight tee", type: "garment", placements: ["front"] },
+              { key: "heavyweight hoodie", name: "Heavyweight hoodie", type: "garment", placements: ["front"] },
+              { key: "poster", name: "Poster", type: "print", placements: ["front"] },
+              { key: "tote bag", name: "Tote bag", type: "tote", placements: ["front"] },
+              { key: "hat", name: "Hat", type: "hat", placements: ["front"] },
+              { key: "sticker", name: "Sticker", type: "sticker", placements: ["front"] }
+            ];
         const text = await openAiJson({
           model,
           schemaName: "droplink_relic_plan",
-          schema: relicPlanJsonSchema(input.relicCount),
+          schema: relicPlanJsonSchema(input.relicCount, catalogOptions.map((entry) => entry.key)),
           prompt: [
-            "You are the artifact of a cosmic atelier that came to earth to distill the core essence of the coolest brands humans have created.",
-            `Create exactly ${input.relicCount} unique merch products for a ${input.collectionType} collection.`,
-            "Each product must have exactly one fixed product family and one fixed purchasable variant later. No sizes, no colors, no quantities.",
+            "You are Hermes, the DropLink agent that creates finite physical relic concepts from one public URL.",
+            `Create exactly ${input.relicCount} unique relic products for one finite DropLink.`,
+            "Each relic will have exactly 8 physical editions. The complete run is finite and ends at 24 objects.",
             "Each product must include physical_archetype: garment, poster, tote, sticker, hat, print, or other.",
-            "Useful product families: premium tee, heavyweight hoodie, tote bag, notebook, mug, poster, framed poster, laptop sleeve, hat, sticker.",
+            "Choose products from the provided Printful catalog options. Use printful_product_key exactly as provided; do not invent catalog keys.",
+            `Printful catalog options JSON: ${JSON.stringify(catalogOptions)}`,
             `Brand study JSON: ${JSON.stringify(input.study)}`
           ].join("\n\n")
         });
@@ -186,7 +200,9 @@ function brandStudyJsonSchema() {
   };
 }
 
-function relicPlanJsonSchema(relicCount: 3 | 8) {
+function relicPlanJsonSchema(relicCount: 3 | 8, printfulProductKeys: string[] = []) {
+  const printfulProductKeySchema =
+    printfulProductKeys.length > 0 ? { type: "string", enum: printfulProductKeys } : { type: "string" };
   return {
     type: "object",
     additionalProperties: false,
@@ -221,7 +237,7 @@ function relicPlanJsonSchema(relicCount: 3 | 8) {
             why_this_exists: { type: "string" },
             art_direction: { type: "string" },
             suggested_price_cents: { type: "integer", minimum: 1200 },
-            printful_product_key: { type: "string" }
+            printful_product_key: printfulProductKeySchema
           }
         }
       }
@@ -256,8 +272,8 @@ function mockBrandStudy(input: { domain: string; title: string; description: str
   });
 }
 
-function mockRelicPlan(study: BrandStudyJson, relicCount: 3 | 8, collectionType: "genesis" | "weekly"): RelicPlanJson {
-  const families = ["premium tee", "heavyweight hoodie", "poster", "tote bag", "notebook", "mug", "framed poster", "laptop sleeve"];
+function mockRelicPlan(study: BrandStudyJson, relicCount: 3, _collectionType: "drop"): RelicPlanJson {
+  const families = ["heavyweight tee", "heavyweight hoodie", "poster", "tote bag", "notebook", "mug", "framed poster", "laptop sleeve"];
   const archetypes = ["body", "shrine", "wall", "carry", "desk", "drink", "ritual", "tool"];
   const relics = Array.from({ length: relicCount }, (_, index) => {
     const family = families[index % families.length];
@@ -270,15 +286,14 @@ function mockRelicPlan(study: BrandStudyJson, relicCount: 3 | 8, collectionType:
       description: `A limited ${family} carrying the ${study.essence.slice(0, 86)} signal.`,
       why_this_exists: `This exists because ${study.brand_name} brought ${study.what_they_bring_to_the_world.slice(0, 140)}.`,
       art_direction: `${study.aesthetic_motifs.join(", ")} using ${study.color_palette.join(", ")}; avoid exact logos.`,
-      suggested_price_cents: family.includes("hoodie") ? 8800 : family.includes("poster") ? 3800 : 5200,
+      suggested_price_cents: family.includes("hoodie") ? 7600 : family.includes("poster") ? 3800 : 5200,
       printful_product_key: family
     };
   });
   return validateRelicPlan(
     {
-      collection_title: collectionType === "weekly" ? `${study.brand_name} Weekly Drop` : `${study.brand_name} Genesis Drop`,
-      collection_subtitle:
-        collectionType === "weekly" ? "this week's 8 products · 8 units each" : "3 unique products · 8 units each",
+      collection_title: `${study.brand_name} DropLink`,
+      collection_subtitle: "3 relics · 8 items each · 24 merch SKUs",
       relics
     },
     relicCount

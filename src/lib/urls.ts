@@ -3,6 +3,12 @@ import net from "net";
 
 const blockedHostnames = new Set(["localhost", "localhost.localdomain"]);
 
+export function withDefaultHttpsScheme(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return trimmed;
+  return /^[a-z][a-z\d+\-.]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
 function isPrivateIp(ip: string): boolean {
   if (net.isIPv4(ip)) {
     const [a, b] = ip.split(".").map(Number);
@@ -28,9 +34,9 @@ function isPrivateIp(ip: string): boolean {
 export async function normalizePublicUrl(input: string): Promise<URL> {
   let parsed: URL;
   try {
-    parsed = new URL(input.trim());
+    parsed = new URL(withDefaultHttpsScheme(input));
   } catch {
-    throw new Error("Enter a valid URL, including https://.");
+    throw new Error("Enter a valid URL.");
   }
 
   if (!["http:", "https:"].includes(parsed.protocol)) {

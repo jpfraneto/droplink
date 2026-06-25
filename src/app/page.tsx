@@ -1,13 +1,13 @@
 import Link from "next/link";
 import { LatestDroplinks } from "@/components/LatestDroplinks";
 import { publicProductCopy } from "@/lib/publicCopy";
-import { isPublicStorefrontReady, listStorefrontBundles } from "@/lib/store";
+import { listStorefrontBundles } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
   const storefronts = (await listStorefrontBundles())
-    .filter((bundle) => isPublicStorefrontReady(bundle))
+    .filter((bundle) => bundle.drop?.status === "published" || bundle.drop?.status === "sold_out")
     .slice(0, 12)
     .map((bundle) => ({
       id: bundle.storefront.id,
@@ -34,10 +34,9 @@ export default async function HomePage() {
           </Link>
         </header>
         <section className="hero">
-          <h1 className="hero-title">paste any link. get a merch drop.</h1>
+          <h1 className="hero-title">Turn any link into a finite merch drop.</h1>
           <p>
-            DropLink studies your brand and distills it into 3 unique products
-            people can buy immediately.
+            Paste a link. Pay 8 USDC to process it. If the owner of the domain, verified via a _txt record on DNS, claims it you get 8% of the revenue. 3 relics, 8 items each. 24 SKUs. When sold out it is sold out forever.
           </p>
         </section>
         <LatestDroplinks initial={storefronts} />

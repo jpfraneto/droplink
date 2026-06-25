@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
-import { verifyDnsTxt } from "@/lib/dnsClaim";
 import { rateLimit, requestIp } from "@/lib/rateLimit";
 import { redirectTo } from "@/lib/redirects";
-import { getClaim, markClaimVerified, recordEvent } from "@/lib/store";
+import { getClaim, recordEvent, verifyDropClaim } from "@/lib/store";
 
 export async function POST(request: Request, { params }: { params: { id: string } }) {
   const wantsJson = request.headers.get("accept")?.includes("application/json") || request.headers.get("content-type")?.includes("application/json");
@@ -16,9 +15,8 @@ export async function POST(request: Request, { params }: { params: { id: string 
     return NextResponse.json({ error: "Claim not found." }, { status: 404 });
   }
   try {
-    const ok = await verifyDnsTxt(claim.txtName, claim.txtValue);
+    const ok = Boolean(claim.dropId ? await verifyDropClaim(claim.dropId) : false);
     if (ok) {
-      await markClaimVerified(claim.id);
       await recordEvent({
         entityType: "storefront",
         entityId: claim.storefrontId,

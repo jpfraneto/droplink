@@ -17,10 +17,10 @@ export function ProductCard({
 
   return (
     <article className="card">
-      <img className="product-image" src={mockup?.imageUrl || `/api/mockups/${relic.id}.svg`} alt={relic.name} />
+      {mockup?.imageUrl ? <img className="product-image" src={mockup.imageUrl} alt={relic.name} /> : null}
       <div className="card-body">
         <p className="pill" style={{ margin: "0 0 12px" }}>
-          limited product
+          finite relic
         </p>
         <h3 className="product-title">{relic.name}</h3>
         <p className="muted">{relic.description}</p>

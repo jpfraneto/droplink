@@ -1,5 +1,23 @@
+export function openAIImageGenerationBody(prompt: string) {
+  return {
+    model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
+    prompt,
+    size: process.env.OPENAI_IMAGE_SIZE || "1024x1024",
+    ...(process.env.OPENAI_IMAGE_QUALITY ? { quality: process.env.OPENAI_IMAGE_QUALITY } : {})
+  };
+}
+
+export function imageProviderMode() {
+  return process.env.IMAGE_PROVIDER || (process.env.OPENAI_API_KEY ? "openai" : "mock");
+}
+
+export function manualImageMode() {
+  return ["manual", "chatgpt", "chatgpt_manual"].includes(imageProviderMode());
+}
+
 export async function generateOpenAIProductImage(prompt: string): Promise<Buffer | null> {
-  if (process.env.IMAGE_PROVIDER !== "openai" || !process.env.OPENAI_API_KEY) {
+  const provider = imageProviderMode();
+  if (provider !== "openai" || !process.env.OPENAI_API_KEY) {
     return null;
   }
 
@@ -10,12 +28,7 @@ export async function generateOpenAIProductImage(prompt: string): Promise<Buffer
         "content-type": "application/json",
         authorization: `Bearer ${process.env.OPENAI_API_KEY}`
       },
-      body: JSON.stringify({
-        model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
-        prompt,
-        size: "1024x1024",
-        response_format: "b64_json"
-      })
+      body: JSON.stringify(openAIImageGenerationBody(prompt))
     });
 
     if (!response.ok) {

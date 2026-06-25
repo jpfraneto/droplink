@@ -6,7 +6,10 @@ import {
   completeCheckoutSale,
   createFulfillmentOrder,
   expireCheckoutByStripeSession,
-  recordEvent
+  getFulfillmentOrderByOrderId,
+  recordEvent,
+  updateOrderFulfillmentFields,
+  updateStripeConnectPayoutStatus
 } from "@/lib/store";
 
 export async function POST(request: Request) {
@@ -47,6 +50,10 @@ export async function POST(request: Request) {
       const relic = sale.bundle.relics.find((entry) => entry.id === sale.order.relicId);
       if (relic) {
         try {
+          const existingFulfillment = await getFulfillmentOrderByOrderId(sale.order.id);
+          if (existingFulfillment?.providerOrderId) {
+            return NextResponse.json({ received: true, skipped: "printful draft already exists" });
+          }
           const draft = await createPrintfulDraftOrder({
             bundle: sale.bundle,
             relic,
@@ -75,6 +82,13 @@ export async function POST(request: Request) {
             costsJson: draft.costsJson,
             webhookEventsJson: {},
             trackingUrl: null
+          });
+          await updateOrderFulfillmentFields({
+            orderId: sale.order.id,
+            printfulOrderId: draft.providerOrderId,
+            printfulStatus: confirmed.status === "confirmed" ? "confirmed" : "draft_created",
+            printfulDashboardUrl: draft.dashboardUrl,
+            printfulCostsJson: draft.costsJson || undefined
           });
           await recordEvent({
             entityType: "storefront",
@@ -110,6 +124,29 @@ export async function POST(request: Request) {
         level: "info",
         message: "Stripe checkout expired; edition released.",
         metadataJson: {},
+        requestId: request.headers.get("x-request-id"),
+        traceId: null
+      });
+    }
+    if (event.type === "account.updated") {
+      const account = event.data.object;
+      await updateStripeConnectPayoutStatus({
+        accountId: account.id,
+        payoutsEnabled: Boolean(account.payouts_enabled),
+        chargesEnabled: Boolean(account.charges_enabled),
+        detailsSubmitted: Boolean(account.details_submitted)
+      });
+      await recordEvent({
+        entityType: "stripe_account",
+        entityId: account.id,
+        eventType: "stripe_connect_account_updated",
+        level: "info",
+        message: "Stripe Connect account status updated.",
+        metadataJson: {
+          payoutsEnabled: Boolean(account.payouts_enabled),
+          chargesEnabled: Boolean(account.charges_enabled),
+          detailsSubmitted: Boolean(account.details_submitted)
+        },
         requestId: request.headers.get("x-request-id"),
         traceId: null
       });

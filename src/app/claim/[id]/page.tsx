@@ -5,7 +5,7 @@ import { getClaim } from "@/lib/store";
 export const dynamic = "force-dynamic";
 
 function statusMessage(status?: string, message?: string) {
-  if (status === "verified") return { kind: "success", text: "DNS verified. This storefront is now claimed." };
+  if (status === "verified") return { kind: "success", text: "DNS verified. This DropLink is now claimed." };
   if (status === "missing") return { kind: "warn", text: "DNS record not found yet. Add the TXT record below, then wait a few minutes and check again." };
   if (status === "rate_limited") return { kind: "warn", text: "Too many checks. Wait a minute and try again." };
   if (status === "error") return { kind: "warn", text: message ? `DNS check failed: ${message}` : "DNS check failed. Try again in a few minutes." };
@@ -33,7 +33,7 @@ export default async function ClaimPage({
           <span className="badge">{claim.status}</span>
         </header>
         <section className="admin-panel">
-          <h1>Claim storefront</h1>
+          <h1>Claim DropLink</h1>
           <p className="muted">Add this DNS TXT record, then check verification.</p>
           {notice ? (
             <div className={notice.kind === "success" ? "success-note" : "warning-note"}>

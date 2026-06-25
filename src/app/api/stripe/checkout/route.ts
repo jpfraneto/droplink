@@ -6,7 +6,9 @@ import { requestBaseUrl } from "@/lib/redirects";
 import { recordEvent } from "@/lib/store";
 
 const requestSchema = z.object({
-  relicId: z.string().min(3)
+  relicId: z.string().min(3),
+  editionId: z.string().optional(),
+  editionNumber: z.number().int().min(1).max(8).optional()
 });
 
 export async function POST(request: Request) {
@@ -17,6 +19,8 @@ export async function POST(request: Request) {
     const body = requestSchema.parse(await request.json());
     const result = await createRelicCheckoutSession({
       relicId: body.relicId,
+      editionId: body.editionId || null,
+      editionNumber: body.editionNumber || null,
       baseUrl: requestBaseUrl(request),
       requestId: request.headers.get("x-request-id")
     });
