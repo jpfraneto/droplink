@@ -37,6 +37,10 @@ export type GenerationStep =
   | "INTAKE_CREATED"
   | "CRAWLING"
   | "CRAWLED"
+  | "DISCOVERING_BRAND"
+  | "BRAND_DISCOVERED"
+  | "BUILDING_DOSSIER"
+  | "DOSSIER_READY"
   | "DISTILLING"
   | "DISTILLED"
   | "PLANNING_RELICS"
@@ -47,6 +51,8 @@ export type GenerationStep =
   | "PRINT_FILES_READY"
   | "VALIDATING_PRINT_FILES"
   | "PRINT_FILES_VALID"
+  | "GENERATING_LIFESTYLE_IMAGES"
+  | "LIFESTYLE_IMAGES_READY"
   | "GENERATING_MOCKUPS"
   | "MOCKUPS_READY"
   | "GENERATING_OG"
@@ -210,6 +216,41 @@ export type BrandSnapshot = {
   createdAt: string;
 };
 
+export type BrandDiscoveryLink = {
+  url: string;
+  label: string;
+  kind: "social" | "same_as" | "blog" | "docs" | "community" | "source" | "other";
+};
+
+export type VisualEvidence = {
+  url: string;
+  sourcePage: string;
+  kind: "og_image" | "favicon" | "social_avatar" | "social_banner" | "article_cover" | "product_screenshot" | "logo" | "site_image" | "other";
+  width?: number | null;
+  height?: number | null;
+  score: number;
+  reason: string;
+};
+
+export type BrandDiscoveryDossier = {
+  sourceUrl: string;
+  finalUrl: string;
+  canonicalRootDomain: string;
+  discoveredLinks: BrandDiscoveryLink[];
+  visualEvidence: VisualEvidence[];
+  textSignals: {
+    title: string;
+    description: string;
+    headings: string[];
+    repeatedPhrases: string[];
+    textSample: string;
+  };
+  debug: {
+    pagesVisited: string[];
+    blockedUrls: Array<{ url: string; reason: string }>;
+  };
+};
+
 export type BrandStudyJson = {
   brand_name: string;
   domain: string;
@@ -268,6 +309,7 @@ export type RelicFulfillmentSpec = {
   catalogProductId: number;
   catalogVariantId: number;
   productType: string;
+  productCategory?: string;
   productName: string;
   variantName: string;
   placement: string;
@@ -359,7 +401,7 @@ export type Asset = {
   id: string;
   collectionId?: string | null;
   relicId?: string | null;
-  type: "source_image" | "print_file" | "preview" | "og" | "mockup" | "other";
+  type: "source_image" | "print_file" | "preview" | "lifestyle" | "og" | "mockup" | "other";
   url: string;
   storageProvider: string;
   width?: number | null;

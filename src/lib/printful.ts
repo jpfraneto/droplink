@@ -25,6 +25,7 @@ type FulfillmentSelectionInput = {
   description: string;
   artDirection: string;
   suggestedPriceCents: number;
+  avoidProductCategories?: string[];
   traceId?: string | null;
   requestId?: string | null;
 };
@@ -33,6 +34,7 @@ export type SelectedPrintfulVariant = {
   product: CatalogProduct;
   variant: CatalogVariant;
   productType: string;
+  productCategory: string;
   placement: string;
   technique: string;
   selectionReason: string;
@@ -48,6 +50,29 @@ type PrintfulRequestOptions = {
 
 const CATALOG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CATALOG_CACHE_VERSION = "2026-06-24";
+
+function stableNumber(input: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function productCategory(input: Pick<CatalogProduct, "name" | "type" | "raw"> | { name: string; type?: string; raw?: unknown }) {
+  const haystack = `${input.name} ${input.type || ""} ${JSON.stringify(input.raw || {})}`.toLowerCase();
+  if (/hoodie|sweatshirt|fleece/.test(haystack)) return "hoodie";
+  if (/\b(t-?shirt|shirt|tee)\b/.test(haystack)) return "tee";
+  if (/poster|print|canvas|wall art/.test(haystack)) return "poster";
+  if (/tote|bag|backpack/.test(haystack)) return "tote";
+  if (/hat|cap|beanie/.test(haystack)) return "hat";
+  if (/sticker/.test(haystack)) return "sticker";
+  if (/mug|bottle|drink|tumbler/.test(haystack)) return "drinkware";
+  if (/notebook|journal/.test(haystack)) return "notebook";
+  if (/phone|case/.test(haystack)) return "case";
+  return "other";
+}
 
 function devPlacement() {
   return [{ placement: "front", technique: "dtg", layers: [{ type: "file" }] }];
@@ -326,7 +351,7 @@ function targetTerms(input: FulfillmentSelectionInput): string[] {
   return ["shirt", "tee", "poster", "tote"];
 }
 
-function scoreProduct(product: CatalogProduct, terms: string[]) {
+function scoreProduct(product: CatalogProduct, terms: string[], avoidProductCategories: string[] = []) {
   const haystack = `${product.name} ${product.type} ${JSON.stringify(product.raw)}`.toLowerCase();
   let score = 0;
   for (const term of terms) if (haystack.includes(term)) score += 20;
@@ -334,6 +359,7 @@ function scoreProduct(product: CatalogProduct, terms: string[]) {
   if (haystack.includes("dtg") || haystack.includes("digital")) score += 4;
   if (haystack.includes("embroidery")) score -= 10;
   if (haystack.includes("all-over")) score -= 8;
+  if (avoidProductCategories.includes(productCategory(product))) score -= 90;
   return score;
 }
 
@@ -388,6 +414,7 @@ export function buildRelicFulfillmentSpec(input: {
     catalogProductId: input.selection.product.id,
     catalogVariantId: input.selection.variant.id,
     productType: input.selection.productType,
+    productCategory: input.selection.productCategory,
     productName: input.selection.product.name,
     variantName: input.selection.variant.name,
     placement: input.selection.placement,
@@ -408,9 +435,9 @@ export async function selectPrintfulCatalogVariant(input: FulfillmentSelectionIn
   const terms = targetTerms(input);
   const products = await listCatalogProducts(input);
   const topProducts = products
-    .map((product) => ({ product, score: scoreProduct(product, terms) }))
+    .map((product) => ({ product, score: scoreProduct(product, terms, input.avoidProductCategories || []) }))
     .sort((a, b) => b.score - a.score)
-    .slice(0, 6);
+    .slice(0, 10);
   if (!topProducts.length) throw new Error("Printful catalog returned no products.");
 
   let best: { product: CatalogProduct; variant: CatalogVariant; score: number } | null = null;
@@ -427,6 +454,7 @@ export async function selectPrintfulCatalogVariant(input: FulfillmentSelectionIn
     product: best.product,
     variant: best.variant,
     productType: input.physicalArchetype || input.productFamily,
+    productCategory: productCategory(best.product),
     placement: printable.placement,
     technique: printable.technique,
     selectionReason: `Selected dynamically from Printful catalog because ${best.product.name} matched ${terms.join(", ")} and ${best.variant.name} is one fixed purchasable variant. ${printable.reason}`
@@ -438,9 +466,11 @@ export async function printfulCatalogOptionsForPlanning(
 ): Promise<Array<{ key: string; name: string; type: string; placements: string[] }>> {
   assertFulfillmentReady();
   const products = await listCatalogProducts(input);
-  const priority = ["hoodie", "sweatshirt", "shirt", "tee", "t-shirt", "poster", "print", "tote", "bag", "hat", "cap", "sticker", "mug"];
+  const categoryOrder = ["poster", "tee", "tote", "hat", "hoodie", "sticker", "drinkware", "notebook", "case", "other"];
+  const categoryOffset = input.traceId ? stableNumber(input.traceId) % categoryOrder.length : 0;
+  const rotatedCategories = [...categoryOrder.slice(categoryOffset), ...categoryOrder.slice(0, categoryOffset)];
   const seen = new Set<string>();
-  return products
+  const entries = products
     .map((product) => {
       const haystack = `${product.name} ${product.type}`.toLowerCase();
       const placements = Array.isArray(product.raw.placements)
@@ -449,24 +479,38 @@ export async function printfulCatalogOptionsForPlanning(
             .filter(Boolean)
             .slice(0, 4)
         : [];
-      const rank = priority.findIndex((term) => haystack.includes(term));
+      const category = productCategory(product);
       return {
         key: product.name,
         name: product.name,
         type: product.type || "product",
         placements: placements.length ? placements : ["front"],
-        rank: rank === -1 ? 999 : rank
+        category,
+        rank: stableNumber(`${input.traceId || "droplink"}:${category}:${haystack}`)
       };
     })
-    .sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name))
     .filter((entry) => {
       const normalized = entry.name.toLowerCase();
       if (seen.has(normalized)) return false;
       seen.add(normalized);
       return true;
-    })
-    .slice(0, 24)
-    .map(({ rank: _rank, ...entry }) => entry);
+    });
+  const byCategory = new Map<string, typeof entries>();
+  for (const entry of entries) {
+    const group = byCategory.get(entry.category) || [];
+    group.push(entry);
+    byCategory.set(entry.category, group);
+  }
+  for (const group of byCategory.values()) group.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+  const interleaved: typeof entries = [];
+  for (let round = 0; interleaved.length < 24 && round < 6; round += 1) {
+    for (const category of rotatedCategories) {
+      const next = byCategory.get(category)?.[round];
+      if (next) interleaved.push(next);
+      if (interleaved.length >= 24) break;
+    }
+  }
+  return interleaved.slice(0, 24).map(({ rank: _rank, category: _category, ...entry }) => entry);
 }
 
 export async function selectPrintfulFulfillmentSpec(input: FulfillmentSelectionInput & { printFileUrl: string; printFileSha256: string }) {

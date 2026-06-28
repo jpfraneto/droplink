@@ -6,6 +6,7 @@ import {
   RELIC_PLAN_PROMPT_VERSION,
   callHermesForCreativeTask
 } from "./hermesDropAgent";
+import { bestVisualReferences, buildBrandDiscoveryDossier } from "./brandDiscovery";
 import { canonicalizeDropUrl } from "./dropCanonicalization";
 import { assertFiniteDropConfig, dropConfig } from "./env";
 import { newId } from "./hashes";
@@ -13,6 +14,7 @@ import { generateOpenAIProductImage, manualImageMode } from "./imageProvider";
 import { relicMockupSvg } from "./mockups";
 import { ogPng as createOgPng } from "./og";
 import { buildDropPriceBook } from "./pricing";
+import { printfulCatalogImageUrl } from "./printfulReferences";
 import {
   buildRelicFulfillmentSpec,
   createPrintfulMockup,
@@ -64,6 +66,30 @@ function appUrl(): string {
 
 function checksumBuffer(input: Buffer) {
   return createHash("sha256").update(input).digest("hex");
+}
+
+function brandVisibleText(input: string, brandName: string) {
+  return input
+    .replace(/\bDropLink\b/gi, brandName)
+    .replace(/\bdroplink\b/gi, brandName)
+    .replace(/\brelics?\b/gi, "artifact")
+    .replace(/\beditions?\b/gi, "object")
+    .replace(/\btriptych\b/gi, "collection")
+    .replace(/\bSKUs?\b/g, "products")
+    .replace(/\bproduct keys?\b/gi, "product")
+    .replace(/\b(?:[123]\s*\/\s*3|#\s*[123])\b/g, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([,.;:])/g, "$1")
+    .trim();
+}
+
+function productUseInstruction(productType: string, productName: string) {
+  const combined = `${productType} ${productName}`.toLowerCase();
+  if (/shirt|tee|hoodie|sweatshirt|hat|cap/.test(combined)) return "Show one real person wearing the product naturally.";
+  if (/tote|bag/.test(combined)) return "Show one real person carrying or using the product naturally.";
+  if (/poster|print/.test(combined)) return "Show one real person holding, hanging, or standing near the product in a believable interior.";
+  if (/sticker/.test(combined)) return "Show the product applied to a real laptop, notebook, or object in someone's hands.";
+  return "Show one real person using the product naturally in a believable setting.";
 }
 
 async function pngMetadata(buffer: Buffer) {
@@ -251,8 +277,8 @@ export async function generateDropFromUrl(
     dropId,
     type: "drop",
     status: "generating",
-    title: `${brand.name} DropLink Relics`,
-    subtitle: "3 relics · 8 items each · 24 merch SKUs",
+    title: `${brand.name} Artifacts`,
+    subtitle: "a finite brand release",
     relicCount,
     ogImageId: null,
     generatorVersion: GENERATOR_VERSION,
@@ -288,6 +314,19 @@ export async function generateDropFromUrl(
     await event(storefrontId, "crawl_started", "CRAWLING", traceId, "Crawling source URL.", {}, job.id);
     const page = await scrapePublicPage(sourceUrl);
     await event(storefrontId, "crawl_succeeded", "CRAWLED", traceId, "Source URL crawled.", { title: page.title }, job.id);
+    await event(storefrontId, "brand_discovery_started", "DISCOVERING_BRAND", traceId, "Discovering brand neighborhood and visual evidence.", {}, job.id);
+    const discoveryDossier = buildBrandDiscoveryDossier({ page, canonicalRootDomain: hostname });
+    const visualReferences = bestVisualReferences(discoveryDossier, 8);
+    await event(storefrontId, "brand_discovery_succeeded", "BRAND_DISCOVERED", traceId, "Brand discovery completed.", {
+      discoveredLinks: discoveryDossier.discoveredLinks.length,
+      visualEvidence: discoveryDossier.visualEvidence.length,
+      strongVisualReferences: visualReferences.length
+    }, job.id);
+    await event(storefrontId, "brand_dossier_started", "BUILDING_DOSSIER", traceId, "Building brand dossier from discovered evidence.", {}, job.id);
+    await event(storefrontId, "brand_dossier_ready", "DOSSIER_READY", traceId, "Brand dossier ready for Hermes distillation.", {
+      socialLinks: discoveryDossier.discoveredLinks.filter((link) => link.kind === "social" || link.kind === "same_as").slice(0, 8),
+      topVisualEvidence: visualReferences.slice(0, 6)
+    }, job.id);
     const snapshot: BrandSnapshot = {
       id: newId("snap"),
       brandId,
@@ -299,7 +338,7 @@ export async function generateDropFromUrl(
     };
 
     await event(storefrontId, "brand_study_started", "DISTILLING", traceId, "Brand study started.", {}, job.id);
-    const studiedTask = await callHermesForCreativeTask({ type: "study_brand", input: { ...page, traceId } });
+    const studiedTask = await callHermesForCreativeTask({ type: "study_brand", input: { ...page, discoveryDossier, traceId } });
     if (studiedTask.type !== "study_brand") throw new Error("Hermes returned the wrong result type for brand study.");
     const studied = { study: studiedTask.study, modelVersion: studiedTask.modelVersion };
     brand.name = studied.study.brand_name;
@@ -351,8 +390,8 @@ export async function generateDropFromUrl(
     }, job.id);
     const collection: Collection = {
       ...placeholderCollection,
-      title: planned.plan.collection_title,
-      subtitle: planned.plan.collection_subtitle
+      title: brandVisibleText(planned.plan.collection_title, brand.name),
+      subtitle: brandVisibleText(planned.plan.collection_subtitle, brand.name)
     };
     const relicPlan: RelicPlan = {
       id: newId("plan"),
@@ -366,19 +405,21 @@ export async function generateDropFromUrl(
     await event(storefrontId, "printful_matching_started", "MATCHING_PRINTFUL", traceId, "Matching product concepts to Printful catalog variants.", {}, job.id);
     const relicSlugSet = new Set<string>();
     const selectedVariants: SelectedPrintfulVariant[] = [];
+    const usedProductCategories = new Set<string>();
     for (const entry of planned.plan.relics) {
-      selectedVariants.push(
-        await selectPrintfulCatalogVariant({
-          name: entry.name,
-          archetype: entry.archetype,
-          physicalArchetype: entry.physical_archetype,
-          productFamily: `${entry.product_family} ${entry.printful_product_key}`,
-          description: entry.description,
-          artDirection: entry.art_direction,
-          suggestedPriceCents: entry.suggested_price_cents,
-          traceId
-        })
-      );
+      const selected = await selectPrintfulCatalogVariant({
+        name: entry.name,
+        archetype: entry.archetype,
+        physicalArchetype: entry.physical_archetype,
+        productFamily: `${entry.product_family} ${entry.printful_product_key}`,
+        description: entry.description,
+        artDirection: entry.art_direction,
+        suggestedPriceCents: entry.suggested_price_cents,
+        avoidProductCategories: [...usedProductCategories],
+        traceId
+      });
+      selectedVariants.push(selected);
+      usedProductCategories.add(selected.productCategory);
     }
     const relics: Relic[] = planned.plan.relics.map((entry, index) => {
       const selection = selectedVariants[index];
@@ -391,12 +432,12 @@ export async function generateDropFromUrl(
         dropId,
         relicIndex: index + 1,
         slug: relicSlug,
-        name: entry.name,
-        archetype: entry.archetype,
-        productFamily: entry.product_family,
-        description: entry.description,
-        whyThisExists: entry.why_this_exists,
-        artDirection: entry.art_direction,
+        name: brandVisibleText(entry.name, brand.name),
+        archetype: brandVisibleText(entry.archetype, brand.name),
+        productFamily: brandVisibleText(entry.product_family, brand.name),
+        description: brandVisibleText(entry.description, brand.name),
+        whyThisExists: brandVisibleText(entry.why_this_exists, brand.name),
+        artDirection: brandVisibleText(entry.art_direction, brand.name),
         printfulProductId: String(selection.product.id),
         printfulVariantId: String(selection.variant.id),
         fulfillmentSpecJson: null,
@@ -423,15 +464,19 @@ export async function generateDropFromUrl(
       const previewAssetId = newId("asset");
       const visualDna = studied.study.visual_dna;
       const prompt = [
-        `Create print-ready product artwork for ${brand.name}, one relic in a cohesive three-object DropLink triptych.`,
+        `Create ONLY the raw print-ready artwork file for ${brand.name}, one object in a cohesive three-object brand collection.`,
+        "CRITICAL OUTPUT CONTRACT: generate a flat standalone design on a transparent or plain solid background. Do not render a hoodie, shirt, sweatshirt, tote, poster frame, model, hanger, room, scene, product mockup, label tag, watermark, or ecommerce photo.",
+        "BRAND-ONLY VISIBILITY: the final artwork must look like it belongs to the represented brand, not to DropLink. Do not include the words DropLink, relic, edition, triptych, SKU, product key, 1/3, 2/3, 3/3, #1, #2, or #3 anywhere in the image.",
+        "Do not show internal numbering, collection mechanics, edition counts, website UI, QR codes, checkout language, or platform labels. If you include text, use only short brand-native words or phrases that fit the brand itself.",
+        "This image is the artwork that will be uploaded to Printful, not the product preview. It must be usable as a print file by itself.",
+        "Keep all garment/product context as placement guidance only. The final pixels should be the design graphic, centered and isolated.",
         `Product: ${selection.product.name}, fixed variant: ${selection.variant.name}.`,
         `Placement: ${selection.placement}. Technique: ${selection.technique}.`,
-        `Triptych position: ${index + 1} of ${relics.length}.`,
+        `Internal role for variation only, not visible text: object ${index + 1} has the role "${planEntry.role_in_triptych}".`,
         `Drop concept: ${planned.plan.drop_concept}`,
         `Drop lore: ${planned.plan.drop_lore}`,
         `Drop narrative seed: ${studied.study.drop_narrative_seed}`,
-        `Relic concept: ${relic.name}. ${relic.description}`,
-        `Role in triptych: ${planEntry.role_in_triptych}`,
+        `Artifact concept: ${relic.name}. ${relic.description}`,
         `Why this exists: ${relic.whyThisExists}`,
         `Brand archetype: ${studied.study.archetype}`,
         `Brand essence: ${studied.study.essence}`,
@@ -444,13 +489,20 @@ export async function generateDropFromUrl(
         `Aesthetic motifs: ${studied.study.aesthetic_motifs.join(", ")}`,
         `Color palette: ${studied.study.color_palette.join(", ")}`,
         `Art direction: ${relic.artDirection}`,
-        "Make this artifact visually sibling to the other two relics: shared palette, shared symbolic grammar, distinct role.",
-        "Use precise, print-friendly geometry and a strong centered composition with intentional negative space.",
+        visualReferences.length
+          ? `Brand visual references discovered during the rabbit-hole pass:\n${visualReferences.map((entry, refIndex) => `${refIndex + 1}. ${entry.url} (${entry.kind}, score ${entry.score}) — ${entry.reason}`).join("\n")}`
+          : "No strong brand visual references were found; rely on the written dossier and avoid overclaiming visual specificity.",
+        discoveryDossier.discoveredLinks.length
+          ? `Brand neighborhood links:\n${discoveryDossier.discoveredLinks.slice(0, 8).map((entry) => `${entry.kind}: ${entry.url}`).join("\n")}`
+          : "",
+        "Make this raw artwork visually related to the other two brand artifacts: shared palette, shared symbolic grammar, distinct role.",
+        "Use precise, print-friendly geometry, clean edges, generous transparent/plain negative space, and no photographic product rendering.",
         "If using words, use only short original phrases implied by the plan; avoid dense copy and avoid copying website text verbatim.",
+        "Before finalizing, remove any visible text that describes the artifact as a relic, edition, drop, numbered item, SKU, or DropLink object.",
         `Avoid: ${studied.study.things_to_avoid.join(", ")}`,
         page.ogImage ? `Use this source image only as loose brand reference, not as a logo to copy exactly: ${page.ogImage}` : "",
         page.favicon ? `Optional favicon reference: ${page.favicon}` : "",
-        "Avoid trademarked logos unless they are visibly present in the public source. No mockup, no shirt body, no background scene."
+        "Avoid trademarked logos unless they are visibly present in the public source. Final answer must be raw design only: no mockup, no shirt body, no background scene."
       ].filter(Boolean).join("\n");
       const generated = await productArtBuffer(brand, relic, prompt);
       const normalizedPng = await sharp(generated.buffer).png({ compressionLevel: 9 }).toBuffer();
@@ -486,6 +538,7 @@ export async function generateDropFromUrl(
         printFileUrl: printObject.url,
         printFileSha256: fileSha256
       });
+      const printfulReferenceImageUrl = printfulCatalogImageUrl(fulfillmentSpec.rawPrintfulCatalogSnapshotJson);
       relic.fulfillmentSpecJson = fulfillmentSpec;
       relic.priceCents = Math.max(relic.priceCents, Math.round(Number(fulfillmentSpec.retailPriceUsd) * 100));
       const printFile: Asset = {
@@ -511,9 +564,15 @@ export async function generateDropFromUrl(
           manualUploadRequired: generated.validationStatus === "pending",
           sourceOgImage: page.ogImage || null,
           sourceFavicon: page.favicon || null,
+          discoveryDossier: {
+            discoveredLinks: discoveryDossier.discoveredLinks.slice(0, 12),
+            visualEvidence: discoveryDossier.visualEvidence.slice(0, 12),
+            repeatedPhrases: discoveryDossier.textSignals.repeatedPhrases
+          },
           dropConcept: planned.plan.drop_concept,
           roleInTriptych: planEntry.role_in_triptych,
-          relicCritique
+          relicCritique,
+          printfulProductImageUrl: printfulReferenceImageUrl
         },
         createdAt: now
       };
@@ -565,8 +624,84 @@ export async function generateDropFromUrl(
           createdAt: now
         });
       }
+      await event(storefrontId, "lifestyle_image_started", "GENERATING_LIFESTYLE_IMAGES", traceId, `Generating product-in-use image for ${relic.name}.`, {
+        relicId: relic.id,
+        productName: fulfillmentSpec.productName,
+        variantName: fulfillmentSpec.variantName
+      }, job.id);
+      const lifestylePrompt = [
+        `Create a catchy editorial product-in-use image for ${brand.name}.`,
+        productUseInstruction(fulfillmentSpec.productType, fulfillmentSpec.productName),
+        `Product: ${fulfillmentSpec.productName}, fixed variant: ${fulfillmentSpec.variantName}.`,
+        `Use this uploaded print artwork as the exact design that appears on the product: ${previewObject.url}`,
+        printfulReferenceImageUrl
+          ? `Use this selected Printful catalog item image as the base product silhouette, color, and proportions: ${printfulReferenceImageUrl}`
+          : "Use the selected Printful product name and variant as the base product form; preserve believable catalog proportions.",
+        `Artifact: ${relic.name}. ${relic.description}`,
+        `Internal role for variation only, not visible text: ${planEntry.role_in_triptych}`,
+        `Collection concept: ${planned.plan.drop_concept}`,
+        `Shared visual system: ${studied.study.visual_dna.core_shapes.join(", ")}; ${studied.study.visual_dna.material_feel}; ${studied.study.visual_dna.signature_gesture}`,
+        `Aesthetic motifs: ${studied.study.aesthetic_motifs.join(", ")}`,
+        `Color palette: ${studied.study.color_palette.join(", ")}`,
+        visualReferences.length
+          ? `Use these brand references only as loose visual evidence, not as exact logos to copy:\n${visualReferences.slice(0, 6).map((entry, refIndex) => `${refIndex + 1}. ${entry.url} (${entry.kind})`).join("\n")}`
+          : "",
+        "The image should feel real, current, and inspectable: clear product visibility, believable human scale, no fake UI chrome.",
+        "Do not invent extra products. Do not use celebrity likenesses. Do not copy exact unauthorized logos. Avoid stock-photo blandness.",
+        "Do not include the words DropLink, relic, edition, triptych, SKU, 1/3, 2/3, 3/3, #1, #2, or #3 as visible text.",
+        `Avoid: ${studied.study.things_to_avoid.join(", ")}`
+      ].filter(Boolean).join("\n");
+      const lifestyleGenerated = await productArtBuffer(brand, relic, lifestylePrompt);
+      const lifestylePng = await sharp(lifestyleGenerated.buffer)
+        .resize({ width: 1200, height: 1200, fit: "cover" })
+        .png({ compressionLevel: 9 })
+        .toBuffer();
+      const lifestyleSha256 = checksumBuffer(lifestylePng);
+      const lifestyleMetadata = await pngMetadata(lifestylePng);
+      const lifestyleObject = await putStoredObject({
+        key: `collections/${collectionId}/relics/${relic.id}/lifestyle-${lifestyleSha256.slice(0, 16)}.png`,
+        body: lifestylePng,
+        contentType: "image/png"
+      });
+      const lifestyleAsset: Asset = {
+        id: newId("asset"),
+        collectionId,
+        relicId: relic.id,
+        type: "lifestyle",
+        url: lifestyleObject.url,
+        storageProvider: lifestyleObject.storageProvider,
+        width: lifestyleMetadata.width,
+        height: lifestyleMetadata.height,
+        checksum: lifestyleSha256,
+        prompt: lifestylePrompt,
+        validationStatus: lifestyleGenerated.validationStatus,
+        metadataJson: {
+          fileType: lifestyleMetadata.fileType,
+          contentType: lifestyleMetadata.contentType,
+          storageKey: lifestyleObject.key,
+          byteSize: lifestyleObject.byteSize,
+          sourcePrintAssetId: printAssetId,
+          sourcePreviewAssetId: previewAssetId,
+          productName: fulfillmentSpec.productName,
+          variantName: fulfillmentSpec.variantName,
+          catalogProductId: fulfillmentSpec.catalogProductId,
+          catalogVariantId: fulfillmentSpec.catalogVariantId,
+          printfulProductImageUrl: printfulReferenceImageUrl,
+          imageProvider: lifestyleGenerated.provider,
+          manualUploadRequired: lifestyleGenerated.validationStatus === "pending",
+          visualEvidence: visualReferences.slice(0, 8)
+        },
+        createdAt: now
+      };
+      assets.push(lifestyleAsset);
+      await event(storefrontId, "lifestyle_image_generated", "GENERATING_LIFESTYLE_IMAGES", traceId, `Generated product-in-use image for ${relic.name}.`, {
+        relicId: relic.id,
+        lifestyleImageUrl: lifestyleObject.url,
+        validationStatus: lifestyleGenerated.validationStatus,
+        prompt: lifestylePrompt
+      }, job.id);
       const relicMockup = mockups[mockups.length - 1];
-      await event(storefrontId, "relic_assets_generated", "GENERATING_PRINT_FILES", traceId, `Generated assets for ${relic.name}.`, {
+      await event(storefrontId, "relic_assets_generated", "GENERATING_LIFESTYLE_IMAGES", traceId, `Generated assets for ${relic.name}.`, {
         relicId: relic.id,
         relicIndex: relic.relicIndex,
         relicName: relic.name,
@@ -585,13 +720,17 @@ export async function generateDropFromUrl(
       }, job.id);
     }
     await event(storefrontId, "print_files_ready", "PRINT_FILES_READY", traceId, "Print files generated.", {}, job.id);
+    await event(storefrontId, "lifestyle_images_ready", "LIFESTYLE_IMAGES_READY", traceId, "Product-in-use images generated.", {
+      ready: assets.filter((asset) => asset.type === "lifestyle" && asset.validationStatus === "valid").length,
+      total: relics.length
+    }, job.id);
     if (manuallyGeneratedImages) {
       await event(
         storefrontId,
         "manual_product_image_prompts_ready",
         "AWAITING_MANUAL_IMAGES",
         traceId,
-        "Manual product image prompts are ready for admin upload.",
+        "Manual product and lifestyle image prompts are ready for admin upload.",
         { relicIds: relics.map((relic) => relic.id) },
         job.id
       );
@@ -626,7 +765,7 @@ export async function generateDropFromUrl(
 
     await event(storefrontId, "og_generation_started", "GENERATING_OG", traceId, "OG image generation started.", {}, job.id);
     const ogPrompt = [
-      `Create a 1200x630 DropLink share image for ${brand.name}.`,
+      `Create a 1200x630 brand share image for ${brand.name}.`,
       `Brand archetype: ${studied.study.archetype}`,
       `Brand essence: ${studied.study.essence}`,
       `Worldview: ${studied.study.worldview}`,
@@ -635,19 +774,21 @@ export async function generateDropFromUrl(
       `Drop concept: ${planned.plan.drop_concept}`,
       `Drop lore: ${planned.plan.drop_lore}`,
       `Narrative seed: ${studied.study.drop_narrative_seed}`,
-      `Use the three product artwork images as primary references and compose them together as one launch image.`,
-      `Products: ${relics.map((relic, index) => `${relic.relicIndex}. ${relic.name} (${relic.productFamily}, ${planned.plan.relics[index]?.role_in_triptych || "triptych relic"})`).join("; ")}`,
+      `Use the three product-in-use images as primary references and compose them together as one launch image.`,
+      `Products: ${relics.map((relic, index) => `${relic.name} (${relic.productFamily}, internal role: ${planned.plan.relics[index]?.role_in_triptych || "brand artifact"})`).join("; ")}`,
       `Visual DNA shapes: ${studied.study.visual_dna.core_shapes.join(", ")}`,
       `Visual DNA material feel: ${studied.study.visual_dna.material_feel}`,
       `Signature gesture: ${studied.study.visual_dna.signature_gesture}`,
       `Aesthetic motifs: ${studied.study.aesthetic_motifs.join(", ")}`,
       `Color palette: ${studied.study.color_palette.join(", ")}`,
       "Include no fake UI chrome, no unauthorized exact logos, no celebrity likenesses, and no extra product concepts.",
-      "Make it feel like one coherent finite drop, not a collage of unrelated mockups."
+      "Do not include the words DropLink, relic, edition, triptych, SKU, 1/3, 2/3, 3/3, #1, #2, or #3 as visible text.",
+      "Make it feel like one coherent brand release, not a collage of unrelated mockups."
     ].join("\n");
+    const lifestyleImageUrls = relics.map((relic) => assets.find((asset) => asset.relicId === relic.id && asset.type === "lifestyle")?.url);
     const ogPng = await createOgPng(brand, collection, relics, {
-      imageUrls: relics.map((relic) => mockups.find((mockup) => mockup.relicId === relic.id)?.imageUrl),
-      publicPath: `${(process.env.DROPLINK_PUBLIC_BASE_URL || "https://droplink.lat").replace(/^https?:\/\//, "").replace(/\/$/, "")}/${slug}`
+      imageUrls: relics.map((relic, index) => lifestyleImageUrls[index] || mockups.find((mockup) => mockup.relicId === relic.id)?.imageUrl),
+      publicPath: hostname
     });
     const ogWebp = await sharp(ogPng).webp({ quality: 82 }).toBuffer();
     const ogChecksum = checksumBuffer(ogPng);
@@ -683,7 +824,8 @@ export async function generateDropFromUrl(
         byteSize: ogObject.byteSize,
         imageProvider: manuallyGeneratedImages ? "manual_chatgpt" : "sharp_composite",
         manualUploadRequired: manuallyGeneratedImages,
-        sourceRelicIds: relics.map((relic) => relic.id)
+        sourceRelicIds: relics.map((relic) => relic.id),
+        sourceLifestyleImageUrls: lifestyleImageUrls
       },
       createdAt: now
     };
@@ -717,7 +859,7 @@ export async function generateDropFromUrl(
       title: collection.title,
       subtitle: collection.subtitle,
       prompt: ogPrompt,
-      compositionJson: { relicIds: relics.map((relic) => relic.id), collectionType: "drop" },
+      compositionJson: { relicIds: relics.map((relic) => relic.id), collectionType: "drop", sourceLifestyleImageUrls: lifestyleImageUrls },
       status: manuallyGeneratedImages ? "manual_pending" : "ready",
       createdAt: now
     };
@@ -768,6 +910,8 @@ export async function generateDropFromUrl(
         printfulVariantSelected: true,
         printFilesGenerated: true,
         printFilesValid: !manuallyGeneratedImages,
+        lifestyleImagesGenerated: true,
+        lifestyleImagesValid: !manuallyGeneratedImages,
         mockupsGenerated: !manuallyGeneratedImages,
         ogGenerated: !manuallyGeneratedImages,
         editionsCreated: true,

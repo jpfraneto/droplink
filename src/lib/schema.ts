@@ -120,8 +120,8 @@ export const brandStudies = pgTable("brand_studies", {
   id: varchar("id", { length: 64 }).primaryKey(),
   brandId: varchar("brand_id", { length: 64 }).notNull().references(() => brands.id, { onDelete: "cascade" }),
   storefrontId: varchar("storefront_id", { length: 64 }).notNull().references(() => storefronts.id, { onDelete: "cascade" }),
-  promptVersion: varchar("prompt_version", { length: 64 }).notNull(),
-  modelVersion: varchar("model_version", { length: 64 }).notNull(),
+  promptVersion: varchar("prompt_version", { length: 128 }).notNull(),
+  modelVersion: varchar("model_version", { length: 128 }).notNull(),
   studyJson: jsonb("study_json").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });
@@ -137,7 +137,7 @@ export const collections = pgTable("collections", {
   relicCount: integer("relic_count").notNull(),
   ogImageId: varchar("og_image_id", { length: 64 }),
   generatorVersion: varchar("generator_version", { length: 64 }).notNull(),
-  promptVersion: varchar("prompt_version", { length: 64 }).notNull(),
+  promptVersion: varchar("prompt_version", { length: 128 }).notNull(),
   publishedAt: timestamp("published_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });
@@ -145,8 +145,8 @@ export const collections = pgTable("collections", {
 export const relicPlans = pgTable("relic_plans", {
   id: varchar("id", { length: 64 }).primaryKey(),
   collectionId: varchar("collection_id", { length: 64 }).notNull().references(() => collections.id, { onDelete: "cascade" }),
-  promptVersion: varchar("prompt_version", { length: 64 }).notNull(),
-  modelVersion: varchar("model_version", { length: 64 }).notNull(),
+  promptVersion: varchar("prompt_version", { length: 128 }).notNull(),
+  modelVersion: varchar("model_version", { length: 128 }).notNull(),
   planJson: jsonb("plan_json").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });

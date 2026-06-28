@@ -700,6 +700,10 @@ export function reviewReadiness(bundle: StorefrontBundle): { ready: boolean; blo
     printFilesValid: relics.every((relic) =>
       bundle.assets.some((asset) => asset.relicId === relic.id && asset.type === "print_file" && asset.validationStatus === "valid")
     ),
+    lifestyleImagesGenerated: relics.every((relic) => bundle.assets.some((asset) => asset.relicId === relic.id && asset.type === "lifestyle")),
+    lifestyleImagesValid: relics.every((relic) =>
+      bundle.assets.some((asset) => asset.relicId === relic.id && asset.type === "lifestyle" && asset.validationStatus === "valid")
+    ),
     mockupsGenerated: relics.every((relic) =>
       bundle.mockups.some((mockup) => mockup.relicId === relic.id && mockup.status === "ready" && /^https:\/\//i.test(mockup.imageUrl) && !mockup.imageUrl.includes("/api/mockups/"))
     ),
@@ -1407,6 +1411,8 @@ export async function updateManualRelicArtwork(input: {
   mockupImageUrl: string;
   printFileUrl: string;
   printFileSha256: string;
+  lifestylePrompt?: string | null;
+  lifestyleMetadataJson?: Record<string, unknown> | null;
 }): Promise<StorefrontBundle | null> {
   if (!usePostgres()) {
     return mutateStore((data) => {
@@ -1442,6 +1448,13 @@ export async function updateManualRelicArtwork(input: {
           status: "ready",
           createdAt: nowIso()
         });
+      }
+      if (input.lifestylePrompt) {
+        const lifestyleAsset = data.assets.find((entry) => entry.relicId === input.relicId && entry.type === "lifestyle");
+        if (lifestyleAsset) {
+          lifestyleAsset.prompt = input.lifestylePrompt;
+          lifestyleAsset.metadataJson = { ...(lifestyleAsset.metadataJson || {}), ...(input.lifestyleMetadataJson || {}) };
+        }
       }
       const drop = data.drops.find((entry) => entry.id === input.dropId);
       const storefront = drop ? data.storefronts.find((entry) => entry.id === drop.storefrontId) : null;
@@ -1490,7 +1503,50 @@ export async function updateManualRelicArtwork(input: {
           image_url = excluded.image_url,
           status = excluded.status
     `;
+    if (input.lifestylePrompt) {
+      await tx`
+        update assets
+        set prompt = ${input.lifestylePrompt},
+            metadata_json = coalesce(metadata_json, '{}'::jsonb) || ${JSON.stringify(input.lifestyleMetadataJson || {})}::jsonb
+        where relic_id = ${input.relicId}
+          and type = 'lifestyle'
+      `;
+    }
   });
+  return getDropBundleByDropId(input.dropId);
+}
+
+export async function updateManualRelicLifestyleImage(input: {
+  dropId: string;
+  collectionId: string;
+  relicId: string;
+  lifestyleAsset: Asset;
+}): Promise<StorefrontBundle | null> {
+  if (!usePostgres()) {
+    return mutateStore((data) => {
+      const existing =
+        data.assets.find((entry) => entry.id === input.lifestyleAsset.id) ||
+        data.assets.find((entry) => entry.relicId === input.relicId && entry.type === "lifestyle");
+      if (existing) Object.assign(existing, input.lifestyleAsset);
+      else data.assets.push(input.lifestyleAsset);
+      const drop = data.drops.find((entry) => entry.id === input.dropId);
+      const storefront = drop ? data.storefronts.find((entry) => entry.id === drop.storefrontId) : null;
+      return storefront ? hydrateBundle(data, storefront) : null;
+    });
+  }
+
+  await sql()`
+    insert into assets ${sql()(toSnake(input.lifestyleAsset))}
+    on conflict (id) do update
+    set url = excluded.url,
+        storage_provider = excluded.storage_provider,
+        width = excluded.width,
+        height = excluded.height,
+        checksum = excluded.checksum,
+        prompt = excluded.prompt,
+        validation_status = excluded.validation_status,
+        metadata_json = excluded.metadata_json
+  `;
   return getDropBundleByDropId(input.dropId);
 }
 
@@ -1542,6 +1598,103 @@ export async function updateManualOgImage(input: {
     `;
     await tx`update collections set og_image_id = ${input.ogImage.id} where id = ${input.collectionId}`;
   });
+  return getDropBundleByDropId(input.dropId);
+}
+
+export async function clearManualAsset(input: {
+  dropId: string;
+  kind: "relic" | "lifestyle" | "og";
+  relicId?: string | null;
+}): Promise<StorefrontBundle | null> {
+  const clearAsset = (asset: Asset) => {
+    asset.validationStatus = "pending";
+    asset.url = "";
+    asset.width = null;
+    asset.height = null;
+    asset.checksum = null;
+    asset.metadataJson = {
+      ...(asset.metadataJson || {}),
+      manualUploadRequired: true,
+      clearedAt: nowIso()
+    };
+  };
+  if (!usePostgres()) {
+    return mutateStore((data) => {
+      const drop = data.drops.find((entry) => entry.id === input.dropId);
+      const storefront = drop ? data.storefronts.find((entry) => entry.id === drop.storefrontId) : null;
+      if (!drop || !storefront) return null;
+      const collection = data.collections.find((entry) => entry.storefrontId === storefront.id && (entry.status === "ready_for_review" || entry.status === "published")) ||
+        data.collections.find((entry) => entry.storefrontId === storefront.id);
+      if (input.kind === "relic" && input.relicId) {
+        for (const asset of data.assets.filter((entry) => entry.relicId === input.relicId && (entry.type === "print_file" || entry.type === "preview"))) {
+          clearAsset(asset);
+        }
+        const mockup = data.mockups.find((entry) => entry.relicId === input.relicId);
+        if (mockup) {
+          mockup.imageUrl = "";
+          mockup.status = "manual_pending";
+        }
+      }
+      if (input.kind === "lifestyle" && input.relicId) {
+        const asset = data.assets.find((entry) => entry.relicId === input.relicId && entry.type === "lifestyle");
+        if (asset) clearAsset(asset);
+      }
+      if (input.kind === "og" && collection) {
+        const asset = data.assets.find((entry) => entry.collectionId === collection.id && entry.type === "og");
+        if (asset) clearAsset(asset);
+        const og = data.ogImages.find((entry) => entry.collectionId === collection.id);
+        if (og) {
+          og.imageUrl = "";
+          og.status = "manual_pending";
+        }
+      }
+      return hydrateBundle(data, storefront);
+    });
+  }
+
+  const bundle = await getDropBundleByDropId(input.dropId);
+  if (!bundle?.activeCollection) return bundle;
+  if (input.kind === "relic" && input.relicId) {
+    await sql()`
+      update assets
+      set validation_status = 'pending',
+          url = '',
+          width = null,
+          height = null,
+          checksum = null,
+          metadata_json = coalesce(metadata_json, '{}'::jsonb) || ${JSON.stringify({ manualUploadRequired: true, clearedAt: nowIso() })}::jsonb
+      where relic_id = ${input.relicId}
+        and type in ('print_file', 'preview')
+    `;
+    await sql()`update mockups set image_url = '', status = 'manual_pending' where relic_id = ${input.relicId}`;
+  }
+  if (input.kind === "lifestyle" && input.relicId) {
+    await sql()`
+      update assets
+      set validation_status = 'pending',
+          url = '',
+          width = null,
+          height = null,
+          checksum = null,
+          metadata_json = coalesce(metadata_json, '{}'::jsonb) || ${JSON.stringify({ manualUploadRequired: true, clearedAt: nowIso() })}::jsonb
+      where relic_id = ${input.relicId}
+        and type = 'lifestyle'
+    `;
+  }
+  if (input.kind === "og") {
+    await sql()`
+      update assets
+      set validation_status = 'pending',
+          url = '',
+          width = null,
+          height = null,
+          checksum = null,
+          metadata_json = coalesce(metadata_json, '{}'::jsonb) || ${JSON.stringify({ manualUploadRequired: true, clearedAt: nowIso() })}::jsonb
+      where collection_id = ${bundle.activeCollection.id}
+        and type = 'og'
+    `;
+    await sql()`update og_images set image_url = '', status = 'manual_pending' where collection_id = ${bundle.activeCollection.id}`;
+  }
   return getDropBundleByDropId(input.dropId);
 }
 

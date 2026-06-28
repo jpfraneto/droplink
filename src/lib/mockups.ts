@@ -43,6 +43,6 @@ export function relicMockupSvg(brand: Brand, relic: Relic): string {
   <circle cx="450" cy="424" r="34" fill="${accent}"/>
   <text x="450" y="656" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="36" fill="#fff2d5">${name}</text>
   <text x="450" y="712" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="800" fill="${gold}">${brandName} / ${family}</text>
-  <text x="450" y="792" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" fill="rgba(255,242,213,.58)">1 of 8 units · DropLink product</text>
+  <text x="450" y="792" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" fill="rgba(255,242,213,.58)">${brandName}</text>
 </svg>`;
 }

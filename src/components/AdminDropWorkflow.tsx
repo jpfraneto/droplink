@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { printfulCatalogImageUrl } from "@/lib/printfulReferences";
 import type { Asset, GenerationJob, StorefrontBundle, SystemEvent } from "@/lib/types";
 
 type ReferenceImage = {
@@ -20,7 +21,7 @@ type LivePayload = {
 };
 
 const pipelineSteps = [
-  { key: "crawl", label: "Read the brand", done: (payload: LivePayload) => Boolean(payload.bundle?.brandStudy || stepAtLeast(payload, "DISTILLED")) },
+  { key: "crawl", label: "Discover the brand", done: (payload: LivePayload) => Boolean(payload.bundle?.brandStudy || stepAtLeast(payload, "DISTILLED")) },
   { key: "plan", label: "Plan the 3 products", done: (payload: LivePayload) => Boolean(payload.bundle?.relicPlan || stepAtLeast(payload, "RELICS_PLANNED")) },
   {
     key: "printful",
@@ -28,7 +29,7 @@ const pipelineSteps = [
     done: (payload: LivePayload) =>
       Boolean(payload.bundle?.relics.length && payload.bundle.relics.every((relic) => relic.printfulProductId && relic.printfulVariantId))
   },
-  { key: "images", label: "Create/upload images", done: (payload: LivePayload) => productImagesReady(payload.bundle) && ogReady(payload.bundle) },
+  { key: "images", label: "Create/upload images", done: (payload: LivePayload) => productImagesReady(payload.bundle) && lifestyleImagesReady(payload.bundle) && ogReady(payload.bundle) },
   { key: "review", label: "Review and publish", done: (payload: LivePayload) => Boolean(payload.bundle?.storefront.status === "published") }
 ];
 
@@ -36,6 +37,10 @@ const stepOrder = [
   "INTAKE_CREATED",
   "CRAWLING",
   "CRAWLED",
+  "DISCOVERING_BRAND",
+  "BRAND_DISCOVERED",
+  "BUILDING_DOSSIER",
+  "DOSSIER_READY",
   "DISTILLING",
   "DISTILLED",
   "PLANNING_RELICS",
@@ -44,6 +49,8 @@ const stepOrder = [
   "PRINTFUL_MATCHED",
   "GENERATING_PRINT_FILES",
   "PRINT_FILES_READY",
+  "GENERATING_LIFESTYLE_IMAGES",
+  "LIFESTYLE_IMAGES_READY",
   "AWAITING_MANUAL_IMAGES",
   "PRINT_FILES_VALID",
   "MOCKUPS_READY",
@@ -74,6 +81,17 @@ function imageUrl(value: unknown) {
 function productReferenceImages(asset: Asset | null): ReferenceImage[] {
   const metadata = asset?.metadataJson || {};
   const refs: ReferenceImage[] = [];
+  const dossier = metadata.discoveryDossier as { visualEvidence?: Array<{ url?: unknown; kind?: unknown; reason?: unknown }> } | undefined;
+  for (const entry of dossier?.visualEvidence || []) {
+    const url = imageUrl(entry.url);
+    if (!url) continue;
+    refs.push({
+      url,
+      title: typeof entry.kind === "string" ? entry.kind.replaceAll("_", " ") : "Brand visual evidence",
+      shortDescription: typeof entry.reason === "string" ? entry.reason : "Discovered during the brand rabbit-hole pass."
+    });
+    if (refs.length >= 6) break;
+  }
   const sourceOgImage = imageUrl(metadata.sourceOgImage);
   const sourceFavicon = imageUrl(metadata.sourceFavicon);
   if (sourceOgImage) {
@@ -96,7 +114,7 @@ function productReferenceImages(asset: Asset | null): ReferenceImage[] {
 function ogReferenceImages(bundle: StorefrontBundle): ReferenceImage[] {
   return bundle.relics
     .map((relic) => {
-      const preview = assetFor(bundle, relic.id, "preview");
+      const preview = assetFor(bundle, relic.id, "lifestyle") || assetFor(bundle, relic.id, "preview");
       if (!preview || preview.validationStatus !== "valid") return null;
       return {
         url: preview.url,
@@ -107,11 +125,61 @@ function ogReferenceImages(bundle: StorefrontBundle): ReferenceImage[] {
     .filter((entry): entry is ReferenceImage => Boolean(entry));
 }
 
+function uniqueReferences(references: ReferenceImage[]) {
+  const seen = new Set<string>();
+  return references.filter((reference) => {
+    if (seen.has(reference.url)) return false;
+    seen.add(reference.url);
+    return true;
+  });
+}
+
+function printfulProductReference(relic: StorefrontBundle["relics"][number]): ReferenceImage | null {
+  const url =
+    imageUrl(relic.fulfillmentSpecJson?.rawPrintfulCatalogSnapshotJson && printfulCatalogImageUrl(relic.fulfillmentSpecJson.rawPrintfulCatalogSnapshotJson)) ||
+    null;
+  if (!url) return null;
+  return {
+    url,
+    title: "Selected Printful item",
+    shortDescription: `${relic.fulfillmentSpecJson?.productName || relic.productFamily} ${relic.fulfillmentSpecJson?.variantName || ""}`.trim()
+  };
+}
+
+function lifestyleReferenceImages(bundle: StorefrontBundle, relic: StorefrontBundle["relics"][number], printAsset: Asset | null) {
+  const previewAsset = assetFor(bundle, relic.id, "preview");
+  const references: ReferenceImage[] = [];
+  const uploadedArtwork = assetValid(printAsset) ? printAsset : assetValid(previewAsset) ? previewAsset : null;
+  if (uploadedArtwork) {
+    references.push({
+      url: uploadedArtwork.url,
+      title: "Uploaded print artwork",
+      shortDescription: "Use this exact design on the selected Printful product."
+    });
+  }
+  const productReference = printfulProductReference(relic);
+  if (productReference) references.push(productReference);
+  return uniqueReferences([...references, ...productReferenceImages(printAsset)]);
+}
+
 function productImagesReady(bundle: StorefrontBundle | null) {
   return Boolean(
     bundle?.relics.length &&
       bundle.relics.every((relic) =>
         bundle.assets.some((asset) => asset.relicId === relic.id && asset.type === "print_file" && asset.validationStatus === "valid")
+      )
+  );
+}
+
+function assetValid(asset: Asset | null) {
+  return Boolean(asset?.validationStatus === "valid" && asset.url);
+}
+
+function lifestyleImagesReady(bundle: StorefrontBundle | null) {
+  return Boolean(
+    bundle?.relics.length &&
+      bundle.relics.every((relic) =>
+        bundle.assets.some((asset) => asset.relicId === relic.id && asset.type === "lifestyle" && asset.validationStatus === "valid")
       )
   );
 }
@@ -129,6 +197,7 @@ function nextAction(payload: LivePayload | null) {
   if (!payload.bundle.relicPlan) return { title: "No action needed", body: "DropLink is choosing the 3 product concepts." };
   if (!payload.bundle.relics.length) return { title: "No action needed", body: "DropLink is matching the plan to Printful products." };
   if (!productImagesReady(payload.bundle)) return { title: "Action needed: upload product images", body: "Use the prompts below in ChatGPT, then upload one image for each product." };
+  if (!lifestyleImagesReady(payload.bundle)) return { title: "Action needed: upload product-in-use images", body: "Use the uploaded artwork and Printful item references below, then upload one catchy image for each product." };
   if (!ogReady(payload.bundle)) return { title: "Action needed: upload the OG image", body: "Use the OG prompt and the three product images as references, then upload the final share image." };
   if (!payload.readiness?.ready) {
     return {
@@ -291,8 +360,8 @@ function ReferenceImages({ references }: { references: ReferenceImage[] }) {
       <h4>Reference images</h4>
       {references.length ? (
         <div className="reference-grid">
-          {references.map((reference) => (
-            <a className="reference-card" href={reference.url} target="_blank" rel="noreferrer" key={reference.url}>
+          {references.map((reference, index) => (
+            <a className="reference-card" href={reference.url} target="_blank" rel="noreferrer" key={`${reference.url}-${index}`}>
               <img src={reference.url} alt={reference.title} />
               <strong>{reference.title}</strong>
               <span>{reference.shortDescription}</span>
@@ -308,24 +377,22 @@ function ReferenceImages({ references }: { references: ReferenceImage[] }) {
 
 function ManualImageSection({ bundle }: { bundle: StorefrontBundle }) {
   const pendingProducts = !productImagesReady(bundle);
-  const pendingOg = productImagesReady(bundle) && !ogReady(bundle);
-  if (!pendingProducts && !pendingOg) {
-    return (
-      <section className="admin-panel">
-        <h2>Images</h2>
-        <p className="success-note">Product images and OG image are uploaded.</p>
-      </section>
-    );
+  const pendingLifestyle = productImagesReady(bundle) && !lifestyleImagesReady(bundle);
+  const pendingOg = productImagesReady(bundle) && lifestyleImagesReady(bundle) && !ogReady(bundle);
+  if (!pendingProducts && !pendingLifestyle && !pendingOg) {
+    return <CompletedImagesSection bundle={bundle} />;
   }
 
   return (
     <section className="admin-panel">
       <div className="admin-actions">
         <div>
-          <h2>{pendingProducts ? "Upload product images" : "Upload OG image"}</h2>
+          <h2>{pendingProducts ? "Upload product artwork" : pendingLifestyle ? "Upload product-in-use images" : "Upload OG image"}</h2>
           <p className="muted">
             {pendingProducts
-              ? "Copy each prompt into ChatGPT, generate one image, then upload it here."
+              ? "Copy each print prompt into ChatGPT, generate one print artwork image, then upload it here."
+              : pendingLifestyle
+              ? "Copy each product-in-use prompt into ChatGPT after the product artwork is ready, then upload the catchy image."
               : "Use the three uploaded product images as references for the final share image."}
           </p>
         </div>
@@ -333,14 +400,19 @@ function ManualImageSection({ bundle }: { bundle: StorefrontBundle }) {
       <div className="manual-image-grid">
         {bundle.relics.map((relic) => {
           const printAsset = assetFor(bundle, relic.id, "print_file");
+          const lifestyleAsset = assetFor(bundle, relic.id, "lifestyle");
+          const activeAsset = pendingLifestyle ? lifestyleAsset : printAsset;
           const previewAsset = assetFor(bundle, relic.id, "preview");
-          const prompt = printAsset?.prompt || relic.artDirection || "";
-          const references = productReferenceImages(printAsset);
+          const visibleImage = pendingLifestyle ? (assetValid(lifestyleAsset) ? lifestyleAsset : previewAsset) : previewAsset;
+          const prompt = activeAsset?.prompt || relic.artDirection || "";
+          const references = pendingLifestyle ? lifestyleReferenceImages(bundle, relic, printAsset) : productReferenceImages(activeAsset || printAsset);
+          const uploadKind = pendingLifestyle ? "lifestyle" : "relic";
+          const uploadLabel = pendingLifestyle ? "upload product-in-use image" : assetValid(printAsset) ? "replace product image" : "upload this product image";
           return (
             <div className="manual-image-card" key={relic.id}>
               <div className="admin-actions">
                 <strong>{relic.relicIndex}. {relic.name}</strong>
-                <span className={`asset-status ${printAsset?.validationStatus || "pending"}`}>{printAsset?.validationStatus || "pending"}</span>
+                <span className={`asset-status ${activeAsset?.validationStatus || "pending"}`}>{activeAsset?.validationStatus || "pending"}</span>
               </div>
               <div className="concept-summary">
                 <div>
@@ -352,7 +424,9 @@ function ManualImageSection({ bundle }: { bundle: StorefrontBundle }) {
                   <p>{relic.description}</p>
                 </div>
               </div>
-              {previewAsset?.url ? <img src={previewAsset.url} alt={`${relic.name} preview`} /> : null}
+              {assetValid(visibleImage) ? (
+                <img src={visibleImage!.url} alt={`${relic.name} uploaded image`} />
+              ) : null}
               <label>
                 <span className="prompt-label">
                   Prompt for ChatGPT
@@ -361,12 +435,20 @@ function ManualImageSection({ bundle }: { bundle: StorefrontBundle }) {
                 <textarea readOnly value={prompt} />
               </label>
               <ReferenceImages references={references} />
-              {printAsset?.validationStatus !== "valid" ? (
+              {(pendingProducts || pendingLifestyle) ? (
                 <form action={`/api/admin/droplinks/${bundle.drop!.id}/manual-assets`} method="post" encType="multipart/form-data">
-                  <input type="hidden" name="kind" value="relic" />
+                  <input type="hidden" name="kind" value={uploadKind} />
                   <input type="hidden" name="relicId" value={relic.id} />
                   <input name="file" type="file" accept="image/*" required />
-                  <button className="btn accent" type="submit">upload this product image</button>
+                  <button className="btn accent" type="submit">{uploadLabel}</button>
+                </form>
+              ) : null}
+              {assetValid(activeAsset) ? (
+                <form action={`/api/admin/droplinks/${bundle.drop!.id}/manual-assets`} method="post" className="inline-form">
+                  <input type="hidden" name="action" value="delete" />
+                  <input type="hidden" name="kind" value={uploadKind} />
+                  <input type="hidden" name="relicId" value={relic.id} />
+                  <button className="btn secondary" type="submit">delete image</button>
                 </form>
               ) : null}
             </div>
@@ -384,7 +466,7 @@ function ManualImageSection({ bundle }: { bundle: StorefrontBundle }) {
               <strong>OG image</strong>
               <span className={`asset-status ${bundle.ogImage?.status === "ready" ? "valid" : "pending"}`}>{bundle.ogImage?.status || "pending"}</span>
             </div>
-            {bundle.ogImage ? <img src={bundle.ogImage.imageUrl} alt={bundle.ogImage.title} /> : null}
+            {bundle.ogImage?.imageUrl ? <img src={bundle.ogImage.imageUrl} alt={bundle.ogImage.title} /> : null}
             <div className="concept-summary">
               <div>
                 <span>Title</span>
@@ -406,8 +488,15 @@ function ManualImageSection({ bundle }: { bundle: StorefrontBundle }) {
             <form action={`/api/admin/droplinks/${bundle.drop!.id}/manual-assets`} method="post" encType="multipart/form-data">
               <input type="hidden" name="kind" value="og" />
               <input name="file" type="file" accept="image/*" required />
-              <button className="btn accent" type="submit">upload OG image</button>
+              <button className="btn accent" type="submit">{bundle.ogImage?.status === "ready" ? "replace OG image" : "upload OG image"}</button>
             </form>
+            {bundle.ogImage?.status === "ready" ? (
+              <form action={`/api/admin/droplinks/${bundle.drop!.id}/manual-assets`} method="post" className="inline-form">
+                <input type="hidden" name="action" value="delete" />
+                <input type="hidden" name="kind" value="og" />
+                <button className="btn secondary" type="submit">delete OG image</button>
+              </form>
+            ) : null}
                 </>
               );
             })()}
@@ -418,10 +507,85 @@ function ManualImageSection({ bundle }: { bundle: StorefrontBundle }) {
   );
 }
 
+function CompletedImagesSection({ bundle }: { bundle: StorefrontBundle }) {
+  return (
+    <section className="admin-panel">
+      <div className="admin-actions">
+        <div>
+          <h2>Images</h2>
+          <p className="success-note">Product images, product-in-use images, and OG image are uploaded.</p>
+        </div>
+      </div>
+      <div className="manual-image-grid">
+        {bundle.relics.map((relic) => {
+          const preview = assetFor(bundle, relic.id, "preview");
+          const lifestyle = assetFor(bundle, relic.id, "lifestyle");
+          return (
+            <div className="manual-image-card" key={relic.id}>
+              <strong>{relic.relicIndex}. {relic.name}</strong>
+              <div className="uploaded-image-pair">
+                {assetValid(preview) ? (
+                  <div>
+                    <span>Product artwork</span>
+                    <img src={preview!.url} alt={`${relic.name} product artwork`} />
+                    <ReplaceDeleteForms bundle={bundle} relicId={relic.id} kind="relic" replaceLabel="replace artwork" />
+                  </div>
+                ) : null}
+                {assetValid(lifestyle) ? (
+                  <div>
+                    <span>Product-in-use</span>
+                    <img src={lifestyle!.url} alt={`${relic.name} product in use`} />
+                    <ReplaceDeleteForms bundle={bundle} relicId={relic.id} kind="lifestyle" replaceLabel="replace in-use image" />
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+        <div className="manual-image-card og">
+          <strong>OG image</strong>
+          {bundle.ogImage?.imageUrl ? <img src={bundle.ogImage.imageUrl} alt={bundle.ogImage.title} /> : null}
+          <ReplaceDeleteForms bundle={bundle} kind="og" replaceLabel="replace OG image" />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ReplaceDeleteForms({
+  bundle,
+  relicId,
+  kind,
+  replaceLabel
+}: {
+  bundle: StorefrontBundle;
+  relicId?: string;
+  kind: "relic" | "lifestyle" | "og";
+  replaceLabel: string;
+}) {
+  return (
+    <div className="asset-actions">
+      <form action={`/api/admin/droplinks/${bundle.drop!.id}/manual-assets`} method="post" encType="multipart/form-data">
+        <input type="hidden" name="kind" value={kind} />
+        {relicId ? <input type="hidden" name="relicId" value={relicId} /> : null}
+        <input name="file" type="file" accept="image/*" required />
+        <button className="btn accent" type="submit">{replaceLabel}</button>
+      </form>
+      <form action={`/api/admin/droplinks/${bundle.drop!.id}/manual-assets`} method="post" className="inline-form">
+        <input type="hidden" name="action" value="delete" />
+        <input type="hidden" name="kind" value={kind} />
+        {relicId ? <input type="hidden" name="relicId" value={relicId} /> : null}
+        <button className="btn secondary" type="submit">delete</button>
+      </form>
+    </div>
+  );
+}
+
 function humanBlocker(blocker: string) {
   const labels: Record<string, string> = {
     domainClaimVerified: "domain has not been DNS-claimed",
     printFilesValid: "product images still need upload",
+    lifestyleImagesValid: "product-in-use images still need upload",
     mockupsGenerated: "product previews still need upload",
     ogGenerated: "OG image still needs upload",
     stripeReady: "Stripe is not configured",

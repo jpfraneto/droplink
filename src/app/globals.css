@@ -1208,6 +1208,34 @@ select {
   gap: 8px;
 }
 
+.manual-image-card .inline-form {
+  display: block;
+}
+
+.asset-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.uploaded-image-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.uploaded-image-pair div {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.uploaded-image-pair span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .concept-summary {
   display: grid;
   gap: 8px;
@@ -1535,6 +1563,7 @@ select {
   .admin-grid,
   .checklist,
   .manual-image-grid,
+  .uploaded-image-pair,
   .reference-grid,
   .workflow-steps,
   .workflow-event {

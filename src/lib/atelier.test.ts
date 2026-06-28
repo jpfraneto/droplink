@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { rm } from "fs/promises";
 import { join } from "path";
+import { bestVisualReferences, buildBrandDiscoveryDossier } from "./brandDiscovery";
 import { canonicalizeDropUrl } from "./dropCanonicalization";
 import { parseDroplinkClaimValue, parseDroplinkPayoutValue, txtRecordNonceMatches, txtRecordPayoutMatches } from "./dnsClaim";
 import { calculateWaterfall } from "./economics";
@@ -117,6 +118,53 @@ describe("OpenAI image request", () => {
   });
 });
 
+describe("brand discovery dossier", () => {
+  test("keeps brand-neighborhood links and filters weak favicon references", () => {
+    const dossier = buildBrandDiscoveryDossier({
+      canonicalRootDomain: "example.com",
+      page: {
+        url: "https://example.com/",
+        finalUrl: "https://example.com/",
+        domain: "example.com",
+        title: "Example",
+        description: "Example creates useful tools for useful people.",
+        ogImage: "https://example.com/og.png",
+        favicon: "https://example.com/favicon.ico",
+        headings: ["Useful tools", "Useful people"],
+        discoveredLinks: [
+          { url: "https://x.com/example", label: "X", kind: "social" },
+          { url: "https://github.com/example", label: "GitHub", kind: "social" },
+          { url: "https://example.com/blog", label: "Blog", kind: "blog" }
+        ],
+        visualEvidence: [
+          {
+            url: "https://example.com/favicon.ico",
+            sourcePage: "https://example.com/",
+            kind: "favicon",
+            width: 32,
+            height: 32,
+            score: 5,
+            reason: "tiny favicon"
+          },
+          {
+            url: "https://example.com/launch-card.png",
+            sourcePage: "https://example.com/",
+            kind: "article_cover",
+            width: 1200,
+            height: 630,
+            score: 89,
+            reason: "launch card"
+          }
+        ],
+        textSample: "Example creates useful tools for useful people. Useful tools make useful people faster."
+      }
+    });
+    expect(dossier.discoveredLinks[0].kind).toBe("social");
+    expect(dossier.textSignals.repeatedPhrases).toContain("useful tools");
+    expect(bestVisualReferences(dossier).map((entry) => entry.url)).toEqual(["https://example.com/launch-card.png"]);
+  });
+});
+
 describe("Printful fulfillment metadata", () => {
   test("chooses a real product placement technique from Printful metadata", () => {
     const printable = choosePrintablePlacement({
@@ -158,6 +206,7 @@ describe("Printful fulfillment metadata", () => {
         },
         variant: { id: 598, name: "Black / M", raw: {} },
         productType: "garment",
+        productCategory: "tee",
         placement: "front",
         technique: "dtg",
         selectionReason: "test"
@@ -493,6 +542,21 @@ async function createBundle(status: "summoned" | "claimed", submittedUrl: string
       prompt: "test",
       validationStatus: "valid" as const,
       metadataJson: { storageKey: `previews/${relic.id}.webp` },
+      createdAt: now
+    },
+    {
+      id: newId("asset"),
+      collectionId: collection.id,
+      relicId: relic.id,
+      type: "lifestyle" as const,
+      url: `https://assets.droplink.test/lifestyle/${relic.id}.png`,
+      storageProvider: "r2",
+      width: 1200,
+      height: 1200,
+      checksum: "test-lifestyle",
+      prompt: "test lifestyle",
+      validationStatus: "valid" as const,
+      metadataJson: { storageKey: `lifestyle/${relic.id}.png` },
       createdAt: now
     }
   ]);

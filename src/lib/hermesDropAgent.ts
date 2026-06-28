@@ -1,10 +1,11 @@
+import { createHash } from "crypto";
 import { z } from "zod";
 import { loggedExternalCall } from "./logger";
-import type { BrandStudyJson, RelicPlanJson } from "./types";
+import type { BrandDiscoveryDossier, BrandStudyJson, RelicPlanJson } from "./types";
 
 export const BRAND_STUDY_PROMPT_VERSION = "brand-study-agentic-2026-06";
-export const RELIC_PLAN_PROMPT_VERSION = "relic-triptych-agentic-2026-06";
-export const RELIC_CRITIQUE_PROMPT_VERSION = "relic-critique-agentic-2026-06";
+export const RELIC_PLAN_PROMPT_VERSION = "relic-triptych-print-artwork-2026-06";
+export const RELIC_CRITIQUE_PROMPT_VERSION = "relic-critique-print-artwork-2026-06";
 
 type BrandStudyInput = {
   url: string;
@@ -12,6 +13,7 @@ type BrandStudyInput = {
   title: string;
   description: string;
   textSample: string;
+  discoveryDossier?: BrandDiscoveryDossier;
   traceId: string;
   requestId?: string | null;
 };
@@ -121,11 +123,12 @@ function brandStudyPrompt(input: BrandStudyInput) {
     "Interpret the brand as if it were a character with taste, posture, materials, rituals, and taboos. Make it useful for product creation without inventing private facts or claiming endorsement.",
     "",
     "METHOD",
-    "1. Read the public evidence: URL, domain, title, description, and visible text sample.",
-    "2. Separate observed brand signal from imaginative interpretation.",
-    "3. Personify the brand in the invocation: 280-420 words, vivid but grounded, no generic startup language.",
-    "4. Extract visual DNA that can guide image generation: shapes, material feel, composition rules, and a repeatable signature gesture.",
-    "5. Create a drop_narrative_seed that can bind exactly three future relics into one story.",
+    "1. Read the public evidence: URL, domain, title, description, visible text sample, and discovery dossier when provided.",
+    "2. Anchor every brand claim in observed evidence. Separate observed brand signal from imaginative interpretation.",
+    "3. Treat discovered social/profile/blog/docs/community links as the brand neighborhood, even if their pages were not fetched yet.",
+    "4. Personify the brand in the invocation: 280-420 words, vivid but grounded, no generic startup language.",
+    "5. Extract visual DNA from actual visual evidence first: ranked images, headings, repeated phrases, colors, motifs, screenshots, banners, and layout hints.",
+    "6. Create a drop_narrative_seed that can bind exactly three future relics into one story.",
     "",
     "CONSTRAINTS",
     "Output only JSON that matches the schema. Think privately before writing final JSON.",
@@ -137,7 +140,19 @@ function brandStudyPrompt(input: BrandStudyInput) {
     `Domain: ${input.domain}`,
     `Title: ${input.title}`,
     `Description: ${input.description}`,
-    `Visible text sample: ${input.textSample.slice(0, 2400)}`
+    `Visible text sample: ${input.textSample.slice(0, 2400)}`,
+    input.discoveryDossier
+      ? `DISCOVERY DOSSIER JSON: ${JSON.stringify({
+          canonicalRootDomain: input.discoveryDossier.canonicalRootDomain,
+          discoveredLinks: input.discoveryDossier.discoveredLinks.slice(0, 16),
+          visualEvidence: input.discoveryDossier.visualEvidence.slice(0, 12),
+          textSignals: {
+            headings: input.discoveryDossier.textSignals.headings.slice(0, 10),
+            repeatedPhrases: input.discoveryDossier.textSignals.repeatedPhrases.slice(0, 10)
+          },
+          debug: input.discoveryDossier.debug
+        })}`
+      : ""
   ].join("\n");
 }
 
@@ -147,16 +162,18 @@ function relicPlanPrompt(
 ) {
   return [
     "ROLE",
-    "You are Hermes, the DropLink creative agent. You turn one living brand study into a finite triptych of physical relics.",
+    "You are Hermes, the DropLink creative agent. You turn one living brand study into a finite set of physical brand artifacts.",
     "",
     "GOAL",
-    `Create exactly ${input.relicCount} relic products for one finite DropLink. The relics must feel like one intentional triptych, not three unrelated merch ideas.`,
+    `Create exactly ${input.relicCount} products for one finite brand collection. They must feel intentionally related, not like unrelated merch ideas.`,
     "",
     "DROP RULES",
     "Each relic has exactly 8 physical editions. The complete run ends at 24 objects.",
     "Each relic must be purchasable through the provided Printful catalog options.",
     "Use printful_product_key exactly as provided. Do not invent catalog keys.",
+    "Prefer three different product categories. Avoid repeating hoodies, tees, hats, posters, totes, stickers, or drinkware unless the provided catalog has no viable alternative.",
     "Each relic needs a distinct role_in_triptych, such as threshold, witness, instrument, banner, vessel, map, oath, or residue.",
+    "Internal words like DropLink, relic, edition, triptych, 1/3, 2/3, 3/3, #1, #2, #3, SKU, and product key must never appear as visible artwork text, product copy, or art_direction text.",
     "",
     "METHOD",
     "1. Re-read the brand invocation and drop_narrative_seed.",
@@ -164,10 +181,13 @@ function relicPlanPrompt(
     "3. Select three product forms that create contrast while sharing the same visual DNA.",
     "4. Make each relic necessary: it should advance the triptych story and carry a different function in the ritual.",
     "5. Keep the plan manufacturable as print-on-demand artwork: no impossible materials, electronics, embroidery-only assumptions, or multi-part objects.",
+    "6. Write art_direction for the raw printable graphic only. It must describe the standalone artwork that goes onto Printful, not a hoodie/shirt/tote mockup, not a person wearing it, and not an ecommerce product photo.",
     "",
     "QUALITY BAR",
     "The plan should feel alive, collectible, and specific to this brand. Avoid generic slogans, literal website screenshots, cheap logo placement, and bland startup swag.",
     "Connect every relic explicitly to the invocation, visual_dna, and drop_narrative_seed.",
+    "Every art_direction must be clear enough to generate an isolated print file: composition, symbols, palette, negative space, line style, and optional short text. Forbid product bodies, models, rooms, hangers, shadows, tags, and mockup framing.",
+    "If the artwork includes text, it may only use brand-native language from the brand's world. Never include DropLink's internal mechanics, numbering, edition counts, or relic labels.",
     "Think privately before writing final JSON. Output only JSON that matches the schema.",
     "",
     `PRINTFUL CATALOG OPTIONS JSON: ${JSON.stringify(catalogOptions)}`,
@@ -191,12 +211,16 @@ function relicCritiquePrompt(
     "2. Fidelity: do they clearly arise from the brand invocation and drop_narrative_seed rather than generic merch tropes?",
     "3. Emotional strength: would a believer understand why these objects deserve to exist in only 8 editions each?",
     "4. Manufacturability: do the product families and printful_product_key values remain valid catalog choices?",
-    "5. Image readiness: is the art_direction concrete enough for high-quality print artwork?",
+    "5. Image readiness: is the art_direction concrete enough for high-quality raw print artwork, and does it explicitly avoid product mockups, people, ecommerce scenes, and garment bodies?",
+    "6. Product spread: do the three products avoid boring category repetition, especially duplicate hoodies?",
     "",
     "REFINEMENT RULES",
     "Return critique_text as a concise editorial note naming what changed and why.",
     "Return refined_plan as the improved complete plan, not a patch.",
     "Keep exactly three relics unless the schema asks otherwise. Preserve valid Printful keys exactly.",
+    "Prefer a stronger product-category spread when the catalog allows it. Do not preserve duplicate hoodies just because the first draft chose them.",
+    "Ensure every refined art_direction describes only a standalone printable design asset. Do not ask image generation for the final product preview at this stage.",
+    "Remove any visible-artwork instructions containing DropLink, relic, edition, triptych, 1/3, 2/3, 3/3, #1, #2, #3, SKU, or product key.",
     "Think privately before writing final JSON. Output only JSON that matches the schema.",
     "",
     `PRINTFUL CATALOG OPTIONS JSON: ${JSON.stringify(catalogOptions)}`,
@@ -306,17 +330,110 @@ function parseHermesBridgeResponse(task: CreativeTask, body: unknown): CreativeT
   return { type: "critique_relics", plan: critique.refined_plan, critique: critique.critique_text, modelVersion: bridgeModelVersion(body) };
 }
 
+async function parseHermesBridgeResponseOrRepair(input: {
+  task: CreativeTask;
+  body: unknown;
+  bridgeUrl: string;
+  bearerToken: string;
+  request: ReturnType<typeof hermesBridgeRequest>;
+}): Promise<CreativeTaskResult> {
+  try {
+    return parseHermesBridgeResponse(input.task, input.body);
+  } catch (error) {
+    const raw = rawBridgeResponseText(input.body);
+    if (!raw) throw error;
+    const repaired = await repairHermesJsonResponse({
+      task: input.task,
+      rawResponse: raw,
+      bridgeUrl: input.bridgeUrl,
+      bearerToken: input.bearerToken,
+      originalPrompt: input.request.prompt
+    });
+    return parseHermesBridgeResponse(input.task, repaired);
+  }
+}
+
 function parseBridgeJsonPayload(body: unknown): unknown {
   if (typeof body === "string") return parsePossiblyFencedJson(body);
   const text =
     stringProperty(body, "output_text") ||
+    stringProperty(body, "response") ||
+    bridgeChatResponseText(body) ||
     stringProperty(body, "text") ||
     stringProperty(body, "content") ||
     stringProperty(body, "message") ||
     stringProperty(objectProperty(body, "result"), "text") ||
     stringProperty(objectProperty(body, "result"), "content");
   if (text) return parsePossiblyFencedJson(text);
-  return objectProperty(body, "result") || objectProperty(body, "data") || body;
+  return objectProperty(body, "response") || objectProperty(body, "result") || objectProperty(body, "data") || body;
+}
+
+function bridgeChatResponseText(body: unknown): string | undefined {
+  const response = objectProperty(body, "response");
+  const choices = response && Array.isArray(response.choices) ? response.choices : null;
+  const first = choices?.[0];
+  if (!first || typeof first !== "object") return undefined;
+  const message = (first as Record<string, unknown>).message;
+  if (!message || typeof message !== "object") return undefined;
+  const content = (message as Record<string, unknown>).content;
+  return typeof content === "string" ? content : undefined;
+}
+
+function rawBridgeResponseText(body: unknown): string | undefined {
+  if (typeof body === "string") return body;
+  return (
+    stringProperty(body, "response") ||
+    bridgeChatResponseText(body) ||
+    stringProperty(body, "output_text") ||
+    stringProperty(body, "text") ||
+    stringProperty(body, "content") ||
+    stringProperty(body, "message") ||
+    stringProperty(objectProperty(body, "result"), "text") ||
+    stringProperty(objectProperty(body, "result"), "content")
+  );
+}
+
+async function repairHermesJsonResponse(input: {
+  task: CreativeTask;
+  rawResponse: string;
+  bridgeUrl: string;
+  bearerToken: string;
+  originalPrompt: string;
+}) {
+  const promptPath = process.env.HERMES_REPAIR_PATH || "/v1/prompt";
+  const endpoint = `${input.bridgeUrl}${promptPath.startsWith("/") ? promptPath : `/${promptPath}`}`;
+  const prompt = [
+    "You are Hermes in JSON repair mode for DropLink.",
+    "",
+    "The Hermes agent already did the creative/research work, but its response was not valid machine JSON.",
+    "Convert the agent output into the exact JSON required by the original DropLink schema contract.",
+    "Preserve the agent's intent and any concrete observations. Use the original prompt only to fill schema-required fields and keep the result grounded.",
+    "Return only valid JSON. Do not include Markdown, commentary, apologies, or code fences.",
+    "",
+    `Task type: ${input.task.type}`,
+    "",
+    "ORIGINAL DROPLINK CONTRACT AND SOURCE PROMPT:",
+    input.originalPrompt,
+    "",
+    "HERMES AGENT OUTPUT TO STRUCTURE:",
+    input.rawResponse.slice(0, 12000)
+  ].join("\n");
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${input.bearerToken}`
+    },
+    body: JSON.stringify({
+      mode: "chat",
+      prompt,
+      max_tokens: Number(process.env.HERMES_REPAIR_MAX_TOKENS || process.env.HERMES_BRIDGE_MAX_TOKENS || 3500),
+      temperature: 0
+    })
+  });
+  const body = await response.json().catch(async () => ({ error: await response.text().catch(() => "") }));
+  if (!response.ok) throw new Error(`Hermes JSON repair returned ${response.status}: ${JSON.stringify(body).slice(0, 500)}`);
+  return body;
 }
 
 function parsePossiblyFencedJson(text: string): unknown {
@@ -345,7 +462,7 @@ function stringProperty(input: unknown, key: string): string | undefined {
 }
 
 function bridgeModelVersion(body: unknown) {
-  return stringProperty(body, "modelVersion") || stringProperty(body, "model") || "hermes_bridge";
+  return stringProperty(body, "modelVersion") || stringProperty(body, "model") || stringProperty(objectProperty(body, "response"), "model") || "hermes_bridge";
 }
 
 export async function callHermesForCreativeTask(task: CreativeTask): Promise<CreativeTaskResult> {
@@ -376,27 +493,116 @@ export async function callHermesForCreativeTask(task: CreativeTask): Promise<Cre
 
 async function runHermesBridgeTask(task: CreativeTask): Promise<CreativeTaskResult> {
   const bridgeUrl = (process.env.HERMES_BRIDGE_URL || "https://hermes.anky.app").replace(/\/$/, "");
-  const bridgePath = process.env.HERMES_BRIDGE_PATH || "/prompt";
+  const configuredBridgePath = process.env.HERMES_BRIDGE_PATH || "/v1/prompt";
+  const bridgePath = configuredBridgePath === "/prompt" ? "/v1/prompt" : configuredBridgePath;
   const endpoint = `${bridgeUrl}${bridgePath.startsWith("/") ? bridgePath : `/${bridgePath}`}`;
   const bearerToken = process.env.HERMES_BRIDGE_TOKEN || process.env.HERMES_AGENT_TOKEN;
   if (!bearerToken) throw new Error("HERMES_BRIDGE_TOKEN is required when HERMES_MODE=agent.");
   const request = hermesBridgeRequest(task);
+  const timeoutMs = Math.max(5_000, Number(process.env.HERMES_BRIDGE_TIMEOUT_MS || 900_000));
+  if (request.mode === "agent" && process.env.HERMES_BRIDGE_USE_TASKS !== "false") {
+    return runHermesBridgeAsyncTask({ task, bridgeUrl, bearerToken, request, timeoutMs });
+  }
   return loggedExternalCall(
     { provider: "hermes_bridge", operation: task.type, traceId: task.input.traceId, requestId: task.input.requestId },
     async () => {
-      const response = await fetch(endpoint, {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${bearerToken}`
+          },
+          body: JSON.stringify(request),
+          signal: controller.signal
+        });
+        if (!response.ok) throw new Error(`Hermes bridge returned ${response.status}: ${await response.text()}`);
+        const body = await response.json();
+        return parseHermesBridgeResponseOrRepair({ task, body, bridgeUrl, bearerToken, request });
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+  );
+}
+
+async function runHermesBridgeAsyncTask(input: {
+  task: CreativeTask;
+  bridgeUrl: string;
+  bearerToken: string;
+  request: ReturnType<typeof hermesBridgeRequest>;
+  timeoutMs: number;
+}): Promise<CreativeTaskResult> {
+  const taskPath = process.env.HERMES_TASKS_PATH || "/v1/tasks";
+  const endpoint = `${input.bridgeUrl}${taskPath.startsWith("/") ? taskPath : `/${taskPath}`}`;
+  const pollIntervalMs = Math.max(1_000, Number(process.env.HERMES_TASK_POLL_INTERVAL_MS || 5_000));
+  const idempotencyKey = hermesTaskIdempotencyKey(input.task, input.request);
+  return loggedExternalCall(
+    { provider: "hermes_bridge", operation: `${input.task.type}.task`, traceId: input.task.input.traceId, requestId: input.task.input.requestId },
+    async () => {
+      const started = Date.now();
+      const submit = await fetch(endpoint, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${bearerToken}`
+          authorization: `Bearer ${input.bearerToken}`,
+          "idempotency-key": idempotencyKey
         },
-        body: JSON.stringify(request)
+        body: JSON.stringify(input.request)
       });
-      if (!response.ok) throw new Error(`Hermes bridge returned ${response.status}: ${await response.text()}`);
-      const body = await response.json();
-      return parseHermesBridgeResponse(task, body);
+      const submitBody = await submit.json().catch(async () => ({ error: await submit.text().catch(() => "") }));
+      if (!submit.ok) throw new Error(`Hermes task submit returned ${submit.status}: ${JSON.stringify(submitBody).slice(0, 500)}`);
+      const taskId = stringProperty(submitBody, "task_id");
+      if (!taskId) {
+        if (stringProperty(submitBody, "status") === "done") {
+          return parseHermesBridgeResponseOrRepair({
+            task: input.task,
+            body: submitBody,
+            bridgeUrl: input.bridgeUrl,
+            bearerToken: input.bearerToken,
+            request: input.request
+          });
+        }
+        throw new Error(`Hermes task submit did not return task_id: ${JSON.stringify(submitBody).slice(0, 500)}`);
+      }
+      while (Date.now() - started < input.timeoutMs) {
+        await sleep(pollIntervalMs);
+        const poll = await fetch(`${endpoint}/${encodeURIComponent(taskId)}`, {
+          headers: { authorization: `Bearer ${input.bearerToken}` }
+        });
+        const body = await poll.json().catch(async () => ({ error: await poll.text().catch(() => "") }));
+        if (!poll.ok) throw new Error(`Hermes task poll returned ${poll.status}: ${JSON.stringify(body).slice(0, 500)}`);
+        const status = stringProperty(body, "status");
+        if (status === "done") {
+          return parseHermesBridgeResponseOrRepair({
+            task: input.task,
+            body,
+            bridgeUrl: input.bridgeUrl,
+            bearerToken: input.bearerToken,
+            request: input.request
+          });
+        }
+        if (status === "error" || status === "failed") {
+          throw new Error(`Hermes task ${taskId} failed: ${stringProperty(body, "error") || JSON.stringify(body).slice(0, 500)}`);
+        }
+      }
+      throw new Error(`Hermes task timed out after ${input.timeoutMs}ms: ${taskId}`);
     }
   );
+}
+
+function hermesTaskIdempotencyKey(task: CreativeTask, request: ReturnType<typeof hermesBridgeRequest>) {
+  const digest = createHash("sha256")
+    .update(JSON.stringify({ type: task.type, traceId: task.input.traceId, prompt: request.prompt }))
+    .digest("hex")
+    .slice(0, 32);
+  return `droplink-${task.input.traceId}-${task.type}-${digest}`.replace(/[^a-zA-Z0-9._:-]/g, "-").slice(0, 180);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function studyBrand(input: BrandStudyInput): Promise<{ study: BrandStudyJson; modelVersion: string }> {
@@ -659,7 +865,7 @@ function mockBrandStudy(input: { domain: string; title: string; description: str
       `${brandName} arrives like a small public ritual for people who prefer evidence over noise. It does not beg for attention; it leaves marks that a builder, collector, or early believer can recognize later as proof that they were present when the signal was still forming.`,
       `The brand feels like a threshold between raw internet momentum and something more deliberate. Its posture is precise, strange, optimistic, and builder-native. It cares about the moment when a loose idea becomes a shared object, when a link stops being disposable and starts behaving like a place people can gather around.`,
       `As a living character, ${brandName} is a keeper of portable proof. It carries diagrams, fragments, charged phrases, and visual tokens in its pockets. It likes clean contrast, compressed symbols, and artifacts that seem recovered from a future launch archive. It dislikes cheap hype, counterfeit authority, and merch that only repeats a name without adding meaning.`,
-      `A DropLink for ${brandName} should feel like three objects from the same ceremony: a mark worn on the body, a signal held in the hand, and a witness placed on the wall. Each piece should make the finite run feel intentional, as if only twenty-four people can hold a physical shard of the brand's current myth before it changes form.`
+      `A finite release for ${brandName} should feel like three objects from the same ceremony: a mark worn on the body, a signal held in the hand, and a witness placed on the wall. Each piece should make the run feel intentional, as if only a few people can hold a physical shard of the brand's current myth before it changes form.`
     ].join(" "),
     essence,
     worldview: `${brandName} believes useful things should feel alive, memorable, and worth sharing.`,
@@ -703,10 +909,10 @@ function mockRelicPlan(study: BrandStudyJson, relicCount: 3, _collectionType: "d
   });
   return validateRelicPlan(
     {
-      collection_title: `${study.brand_name} DropLink`,
-      collection_subtitle: "3 relics · 8 items each · 24 merch SKUs",
+      collection_title: `${study.brand_name} Artifacts`,
+      collection_subtitle: "a finite brand release",
       drop_concept: `${study.brand_name} turns a public signal into three linked artifacts of presence.`,
-      drop_lore: `${study.brand_name} leaves behind a finite triptych: one object to wear, one to carry, and one to witness the signal from the wall.`,
+      drop_lore: `${study.brand_name} leaves behind a finite set: one object to wear, one to carry, and one to witness the signal from the wall.`,
       relics
     },
     relicCount

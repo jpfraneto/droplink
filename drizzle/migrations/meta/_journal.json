@@ -43,6 +43,13 @@
       "when": 1782470000000,
       "tag": "0005_unbounded_generated_relic_descriptors",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1782488640000,
+      "tag": "0006_prompt_model_versions_128",
+      "breakpoints": true
     }
   ]
 }
