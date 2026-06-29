@@ -3,36 +3,47 @@
 import { useState } from "react";
 
 export function DropProductCard({
+  dropId,
   relicId,
+  checkoutUrl,
   imageUrl,
   title,
   description,
-  printfulName,
-  printfulUrl,
   price,
-  unitsLeft,
-  commerceOpen
+  remaining,
+  total = 8,
+  commerceEnabled = true,
+  onPreviewClick
 }: {
-  relicId: string;
+  dropId?: string | null;
+  relicId?: string | null;
+  checkoutUrl?: string | null;
   imageUrl: string;
+  kindLabel?: string;
   title: string;
   description: string;
-  printfulName: string;
-  printfulUrl: string;
   price: string;
-  unitsLeft: number;
-  commerceOpen: boolean;
+  remaining: number;
+  total?: number;
+  commerceEnabled?: boolean;
+  onPreviewClick?: () => void;
 }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const canBuy = commerceOpen && unitsLeft > 0;
+  const soldOut = remaining <= 0;
+  const canBuy = commerceEnabled && !soldOut && Boolean(checkoutUrl || relicId);
 
   async function checkout() {
     if (!canBuy || loading) return;
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/stripe/checkout", {
+      if (checkoutUrl) {
+        window.location.href = checkoutUrl;
+        return;
+      }
+      const endpoint = dropId ? `/api/droplinks/${dropId}/checkout` : "/api/stripe/checkout";
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ relicId })
@@ -48,23 +59,32 @@ export function DropProductCard({
 
   return (
     <article className={`simple-product${canBuy ? " can-buy" : ""}${loading ? " is-loading" : ""}`}>
-      <div className="simple-product-image">
-        {imageUrl ? <img src={imageUrl} alt={title} /> : null}
-      </div>
       <div className="simple-product-copy">
         <h2>{title}</h2>
         <p>{description}</p>
-        <a href={printfulUrl} target="_blank" rel="noreferrer">
-          {printfulName}
-        </a>
-        <div>
-          <span>{price}</span>
-          <span>{unitsLeft} left</span>
+        <div className="simple-product-bottom">
+          <div className="simple-product-meta">
+            <span>{remaining}/{total} left</span>
+            {commerceEnabled ? (
+              <button
+                type="button"
+                disabled={!canBuy || loading}
+                onClick={checkout}
+                aria-label={soldOut ? `${title} is sold out` : `Buy ${title} for ${price}`}
+              >
+                {soldOut ? "SOLD OUT" : loading ? "RESERVING..." : `BUY ${price}`}
+              </button>
+            ) : (
+              <button type="button" onClick={onPreviewClick} aria-label={`Get notified when ${title} goes live`}>
+                BUY {price}
+              </button>
+            )}
+          </div>
         </div>
-        <button type="button" disabled={!canBuy || loading} onClick={checkout}>
-          BUY
-        </button>
         {error ? <small>{error}</small> : null}
+      </div>
+      <div className="simple-product-image">
+        {imageUrl ? <img src={imageUrl} alt={`${title} product image`} /> : <div aria-hidden="true" />}
       </div>
     </article>
   );

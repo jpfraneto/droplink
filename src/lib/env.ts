@@ -1,3 +1,5 @@
+import { SCOUT_BPS, SCOUTING_PRICE_USDC } from "./protocol";
+
 export type ConfigCheck = {
   ready: boolean;
   missing: string[];
@@ -19,13 +21,13 @@ function numberEnv(name: string, fallback: number): number {
 
 export const dropConfig = {
   get summonPriceUsdc() {
-    return process.env.DROPLINK_SUMMON_PRICE_USDC || "8";
+    return process.env.DROPLINK_SUMMON_PRICE_USDC || String(SCOUTING_PRICE_USDC);
   },
   get treasuryAddress() {
     return process.env.DROPLINK_TREASURY_ADDRESS || "";
   },
   get creatorBountyBps() {
-    return numberEnv("DROPLINK_CREATOR_BOUNTY_BPS", 800);
+    return numberEnv("DROPLINK_CREATOR_BOUNTY_BPS", SCOUT_BPS);
   },
   get totalSupply() {
     return numberEnv("DROPLINK_TOTAL_SUPPLY", 24);

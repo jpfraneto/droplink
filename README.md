@@ -1,182 +1,137 @@
 # DropLink
 
-DropLink turns a root domain into one finite merch market.
+DropLink turns a public URL into one finite physical merch market for that URL's root domain.
 
-Anyone can summon a domain. Only the domain owner can claim it, by proving DNS control. A claimed and published DropLink sells exactly 24 physical objects: 3 relics, 8 editions each. When the 24 editions are gone, the drop is complete forever.
+Anyone can scout a domain. Only the domain owner can claim it with DNS. A claimed and published DropLink sells exactly 24 physical objects: 3 products, 8 editions each. When those 24 editions are gone, the drop is complete.
 
 Live app: https://droplink.lat
+
+For the concise product and runtime source of truth, read [DROPLINK_CORE.md](DROPLINK_CORE.md).
+
+## How It Works
+
+1. A visitor pastes a URL on `/`.
+2. DropLink canonicalizes it to the registrable root domain.
+3. If a DropLink already exists for that root domain, the visitor is sent to it.
+4. If it is new, the visitor can scout it by paying the summon fee through x402 or Stripe.
+5. The generation pipeline creates a brand study, 3 products, print assets, mockups, a price book, projected economics, an OG image, and edition records.
+6. The generated page shows the products and the potential earnings split: claimer 8%, domain owner 92%.
+7. The domain owner claims the DropLink by adding a DNS TXT record.
+8. An operator publishes only after readiness checks pass.
+9. Buyers purchase one edition at a time through Stripe Checkout.
+10. Stripe webhooks mark editions sold, create orders, create Printful draft orders, and record ledger accruals.
 
 ## Product Truth
 
 - One registrable/root domain maps to one DropLink.
 - Subdomains and paths are source signals, not separate drops.
-- A DropLink has exactly 3 relics.
-- Each relic has exactly 8 editions.
+- A DropLink has exactly 3 products: Wear, Display, and Use.
+- Each product has exactly 8 editions.
 - Total supply is exactly 24.
 - Status is `summoned`, `claimed`, `published`, `sold_out`, or `archived`.
 - Unclaimed drops can be previewed and claimed, but cannot sell.
 - Claimed drops still cannot sell until readiness passes and an operator publishes them.
 - Published drops sell one edition at a time at the locked price-book price.
 - Sold, reserved, and sold-out editions cannot be bought again.
-- Stripe takes payment.
 - Printful receives real draft orders.
 - `PRINTFUL_CONFIRM_ORDERS=false` is the intended safe/manual production mode.
 - There are no subscriptions, premium plans, carts, unlimited products, or fake scarcity.
 
-## Mechanism
+## Public Surface
 
-1. A URL is submitted.
-2. DropLink canonicalizes it to the root domain with a public-suffix-aware parser.
-3. If that root domain already has a DropLink, the existing drop is returned and no new payment is required.
-4. If it is new, a real x402/stablecoin summon payment is required.
-5. The summoner is recorded as the creator/discoverer.
-6. Hermes generates the drop: brand study, 3 relic concepts, dynamic Printful variants, print files, mockups, price book, projected economics, OG image, and 24 edition records.
-7. The domain owner claims with DNS TXT at `_droplink.<rootDomain>`.
-8. Payout setup happens after claim: Tempo USDC wallet or Stripe Connect.
-9. Operator publish locks the price book and enables checkout.
-10. Stripe webhook marks editions sold, creates internal orders, creates Printful draft orders, and records settled economics.
-11. Ledger accruals track creator bounty, owner proceeds, and protocol fees.
+- `/` is the mobile-first landing and URL input flow.
+- `/directory` lists generated public droplinks.
+- `/:brandSlug` is the public DropLink page.
+- `/:brandSlug/admin` is the per-drop admin page.
+- `/admin` is the operator console.
+- `/claim/:id` is the domain claim flow.
+- `/about`, `/about.md`, and `/terms` provide public context and legal copy.
 
 ## Code Map
 
-Core data model:
+Core data and workflow:
 
 - [src/lib/schema.ts](src/lib/schema.ts) defines the database tables.
-- [src/lib/types.ts](src/lib/types.ts) defines the app-level TypeScript shapes.
+- [src/lib/types.ts](src/lib/types.ts) defines the TypeScript shapes.
+- [src/lib/store.ts](src/lib/store.ts) is the main persistence and workflow layer.
+- [src/lib/protocol.ts](src/lib/protocol.ts) defines public DropLink statuses and revenue split constants.
 - [drizzle/migrations](drizzle/migrations) contains production migrations.
-- [src/lib/store.ts](src/lib/store.ts) is the main persistence layer and workflow state machine.
 
-Canonical identity:
+URL identity:
 
-- [src/lib/dropCanonicalization.ts](src/lib/dropCanonicalization.ts) turns submitted URLs into canonical root-domain DropLink identity.
+- [src/lib/dropCanonicalization.ts](src/lib/dropCanonicalization.ts) turns submitted URLs into canonical root-domain identity.
 - [src/lib/urls.ts](src/lib/urls.ts) normalizes URL input.
-- [src/lib/hashes.ts](src/lib/hashes.ts) creates deterministic ids/hashes.
+- [src/lib/hashes.ts](src/lib/hashes.ts) creates deterministic ids and hashes.
 
-Generation pipeline:
+Generation:
 
-- [src/lib/generateDrop.ts](src/lib/generateDrop.ts) orchestrates one finite DropLink generation.
-- [src/lib/hermesDropAgent.ts](src/lib/hermesDropAgent.ts) calls the LLM for brand study and relic planning.
+- [src/lib/generateDrop.ts](src/lib/generateDrop.ts) orchestrates DropLink generation.
+- [src/lib/hermesDropAgent.ts](src/lib/hermesDropAgent.ts) calls Hermes/LLM flows for brand study and relic planning.
 - [src/lib/scrape.ts](src/lib/scrape.ts) extracts source-site signals.
-- [src/lib/imageProvider.ts](src/lib/imageProvider.ts) generates print artwork.
-- [src/lib/og.ts](src/lib/og.ts) creates the OG image from the selected relics/products.
+- [src/lib/imageProvider.ts](src/lib/imageProvider.ts) generates product artwork.
+- [src/lib/mockups.ts](src/lib/mockups.ts) handles product mockup references.
+- [src/lib/og.ts](src/lib/og.ts) creates share imagery.
 - [src/lib/queues.ts](src/lib/queues.ts) enqueues generation jobs.
-- [src/worker.ts](src/worker.ts) runs the Railway worker.
+- [src/worker.ts](src/worker.ts) runs queued generation work.
 
-Printful fulfillment:
-
-- [src/lib/printful.ts](src/lib/printful.ts) handles catalog lookup, dynamic product/variant scoring, mockup tasks, and draft order creation.
-- [src/app/api/printful/webhook/route.ts](src/app/api/printful/webhook/route.ts) receives Printful events.
-
-Payments and economics:
+Payments, economics, and fulfillment:
 
 - [src/lib/x402.ts](src/lib/x402.ts) verifies summon payments.
-- [src/lib/stripe.ts](src/lib/stripe.ts) creates Stripe Checkout sessions.
-- [src/app/api/stripe/webhook/route.ts](src/app/api/stripe/webhook/route.ts) handles paid/expired checkout events.
+- [src/lib/stripe.ts](src/lib/stripe.ts) creates Stripe Checkout sessions and reads Stripe state.
+- [src/app/api/stripe/webhook/route.ts](src/app/api/stripe/webhook/route.ts) handles checkout completion and expiry.
 - [src/lib/pricing.ts](src/lib/pricing.ts) creates price books and projected economics.
 - [src/lib/economics.ts](src/lib/economics.ts) calculates settled order waterfall.
-- [src/lib/settlement.ts](src/lib/settlement.ts) records settlement/Tempo-ready receipts and blocks fake onchain claims.
+- [src/lib/settlement.ts](src/lib/settlement.ts) records settlement and blocks fake onchain claims.
+- [src/lib/printful.ts](src/lib/printful.ts) handles Printful catalog lookup, mockups, and draft orders.
 
-DNS claim and payout:
+Claim and payout:
 
-- [src/lib/dnsClaim.ts](src/lib/dnsClaim.ts) parses and verifies DNS TXT records.
-- [src/app/api/droplinks/[id]/claim/start/route.ts](src/app/api/droplinks/[id]/claim/start/route.ts) starts walletless domain claim.
-- [src/app/api/droplinks/[id]/claim/verify/route.ts](src/app/api/droplinks/[id]/claim/verify/route.ts) verifies `_droplink.<rootDomain>`.
-- [src/app/api/droplinks/[id]/payout/tempo/start/route.ts](src/app/api/droplinks/[id]/payout/tempo/start/route.ts) starts Tempo wallet proof.
-- [src/app/api/droplinks/[id]/payout/tempo/verify/route.ts](src/app/api/droplinks/[id]/payout/tempo/verify/route.ts) verifies `_droplink-payout.<rootDomain>`.
+- [src/lib/dnsClaim.ts](src/lib/dnsClaim.ts) verifies DNS TXT ownership and payout proofs.
+- [src/app/api/droplinks/[id]/claim/start/route.ts](src/app/api/droplinks/[id]/claim/start/route.ts) starts claim.
+- [src/app/api/droplinks/[id]/claim/verify/route.ts](src/app/api/droplinks/[id]/claim/verify/route.ts) verifies claim.
+- [src/app/api/droplinks/[id]/payout/tempo/start/route.ts](src/app/api/droplinks/[id]/payout/tempo/start/route.ts) starts Tempo payout proof.
+- [src/app/api/droplinks/[id]/payout/tempo/verify/route.ts](src/app/api/droplinks/[id]/payout/tempo/verify/route.ts) verifies Tempo payout proof.
 - [src/app/api/droplinks/[id]/payout/stripe-connect/start/route.ts](src/app/api/droplinks/[id]/payout/stripe-connect/start/route.ts) starts Stripe Connect onboarding.
 
 Public and admin UI:
 
-- [src/app/page.tsx](src/app/page.tsx) is the public home/feed.
-- [src/app/[brandSlug]/page.tsx](src/app/[brandSlug]/page.tsx) is the simple public DropLink page.
-- [src/components/DropProductCard.tsx](src/components/DropProductCard.tsx) renders the three product cards and checkout button.
-- [src/components/ThemeLink.tsx](src/components/ThemeLink.tsx) toggles the generated-theme page mutation.
-- [src/app/about/page.tsx](src/app/about/page.tsx) explains the project for humans.
-- [src/app/about.md/route.ts](src/app/about.md/route.ts) explains the project for agents.
-- [src/app/admin/page.tsx](src/app/admin/page.tsx) is the operator console.
-- [src/components/AdminLiveConsole.tsx](src/components/AdminLiveConsole.tsx) polls live generation state, logs, images, relics, editions, and blockers.
-- [src/app/api/admin/live/route.ts](src/app/api/admin/live/route.ts) powers the live admin console.
+- [src/components/LandingFlow.tsx](src/components/LandingFlow.tsx) powers the landing URL flow.
+- [src/components/DroplinkExperience.tsx](src/components/DroplinkExperience.tsx) renders preview, generated, claimed, and live DropLink states.
+- [src/components/DropProductCard.tsx](src/components/DropProductCard.tsx) renders each generated product.
+- [src/app/directory/page.tsx](src/app/directory/page.tsx) lists generated droplinks.
+- [src/components/AdminDropWorkflow.tsx](src/components/AdminDropWorkflow.tsx) drives admin generation and review.
+- [src/components/AdminLiveConsole.tsx](src/components/AdminLiveConsole.tsx) shows generation state, logs, assets, relics, editions, and blockers.
 
-Config, logging, and safety:
+## Runtime On Poiesis
 
-- [src/lib/env.ts](src/lib/env.ts) reads and validates DropLink config.
-- [src/lib/logger.ts](src/lib/logger.ts) emits structured logs.
-- [src/lib/rateLimit.ts](src/lib/rateLimit.ts) provides request rate limiting.
-- [src/lib/storage.ts](src/lib/storage.ts) stores generated assets locally or in R2.
-- [src/middleware.ts](src/middleware.ts) handles route middleware.
+This app runs locally on Poiesis behind a Cloudflare tunnel.
 
-Tests:
+- Public URL: `https://droplink.lat`
+- Local service URL: `http://127.0.0.1:3020`
+- Web unit: `droplink-web.service`
+- Tunnel unit: `cloudflared-droplink.service`
 
-- [src/lib/atelier.test.ts](src/lib/atelier.test.ts) covers canonicalization, DNS claim, payout setup, pricing, checkout readiness, Printful metadata, and economics.
+After app code changes, build and restart the managed service:
 
-## Routes
+```bash
+bun run build
+systemctl --user restart droplink-web.service
+systemctl --user status droplink-web.service --no-pager -l
+curl -I http://127.0.0.1:3020/
+```
 
-Public:
-
-- `GET /`
-- `GET /:brandSlug`
-- `GET /about`
-- `GET /about.md`
-
-Admin:
-
-- `GET /admin`
-- `GET /api/admin/live`
-- `POST /api/admin/generate`
-- `POST /api/admin/droplinks/:id/publish`
-- `POST /api/admin/droplinks/:id/archive`
-- `GET /api/admin/droplinks/:id/readiness`
-- `POST /api/admin/droplinks/:id/refresh-mockups`
-
-DropLink API:
-
-- `POST /api/droplinks/summon`
-- `POST /api/droplinks/:id/claim/start`
-- `POST /api/droplinks/:id/claim/verify`
-- `POST /api/droplinks/:id/payout/tempo/start`
-- `POST /api/droplinks/:id/payout/tempo/verify`
-- `POST /api/droplinks/:id/payout/stripe-connect/start`
-- `POST /api/droplinks/:id/checkout`
-
-Webhooks:
-
-- `POST /api/stripe/webhook`
-- `POST /api/printful/webhook`
+Do not leave `next dev`, `bun run dev`, or other ad hoc servers running. Use the systemd service for the live local runtime.
 
 ## Local Development
 
 Use Bun only. Do not use npm, pnpm, or yarn.
 
-Minimal setup:
-
 ```bash
-git clone <repo-url>
-cd droplink
 bun install
+bun run dev
 ```
 
-Then run with one environment variable:
-
-```bash
-OPENAI_API_KEY=sk-... bun run dev
-```
-
-Or copy `.env.example` to `.env.local`, set `OPENAI_API_KEY`, and run:
-
-```bash
-cp .env.example .env.local
-bun dev
-```
-
-Open `http://localhost:3000`.
-
-With only `OPENAI_API_KEY`, local development uses:
-
-- JSON file storage at `data/store.json` instead of Postgres.
-- Inline generation instead of Redis/BullMQ.
-- Local generated asset URLs instead of R2.
-- Development-only Printful catalog placeholders for product selection.
-- Commerce blocked until real Stripe, Printful, x402, DNS claim, and readiness are configured.
+The development server defaults to `http://localhost:3000`, but this is not the tunneled Poiesis runtime. The live local service is `127.0.0.1:3020`.
 
 Useful commands:
 
@@ -205,27 +160,16 @@ Core:
 - `DROPLINK_REQUIRE_GENERATION_KEY`
 - `ALLOW_MOCKS`
 
-`DATABASE_URL` and `REDIS_URL` can be empty in local development. They are required for production-style persistence and queues.
+AI and generation:
 
-AI:
-
-- `AI_PROVIDER=openai`
-- `IMAGE_PROVIDER=openai`
+- `AI_PROVIDER`
+- `IMAGE_PROVIDER`
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL`
-- `HERMES_MODE=agent`
-- `HERMES_BRIDGE_URL=https://mirror.anky.app`
-- `HERMES_BRIDGE_PATH=/api/prompt`
-- `HERMES_BRIDGE_MODE=chat`
-- `HERMES_BRIDGE_MAX_TOKENS=3500`
-- `HERMES_BRIDGE_TIMEOUT_MS=900000`
-- `HERMES_BRIDGE_USE_TASKS=false`
-- `HERMES_TASKS_PATH=/v1/tasks`
-- `HERMES_TASK_POLL_INTERVAL_MS=5000`
-- `HERMES_REPAIR_PATH=/api/prompt`
-- `HERMES_REPAIR_MAX_TOKENS=3500`
+- `HERMES_MODE`
+- `HERMES_BRIDGE_URL`
 - `HERMES_BRIDGE_TOKEN`
-- `HERMES_AGENT_FALLBACK=false`
+- `HERMES_AGENT_FALLBACK`
 
 Stripe:
 
@@ -239,8 +183,6 @@ Printful:
 - `PRINTFUL_API_BASE`
 - `PRINTFUL_STORE_ID`
 - `PRINTFUL_CONFIRM_ORDERS=false`
-- `PRINTFUL_DEFAULT_SHIPPING`
-- `PRINTFUL_CURRENCY`
 - `PRINTFUL_WEBHOOK_SECRET`
 
 Storage:
@@ -255,18 +197,11 @@ Storage:
 Drop economics:
 
 - `DROPLINK_SUMMON_PRICE_USDC=8`
-- `DROPLINK_TREASURY_ADDRESS`
 - `DROPLINK_CREATOR_BOUNTY_BPS=800`
 - `DROPLINK_PROTOCOL_FEE_BPS=0`
 - `DROPLINK_TOTAL_SUPPLY=24`
 - `DROPLINK_RELICS_PER_DROP=3`
 - `DROPLINK_EDITIONS_PER_RELIC=8`
-- `DROPLINK_REQUIRE_PAYOUT_BEFORE_PUBLISH=false`
-- `DROPLINK_MIN_UNIT_MARGIN_USD=12`
-- `DROPLINK_PRICE_SAFETY_BUFFER_BPS=1000`
-- `DROPLINK_DEFAULT_REFUND_RESERVE_BPS=300`
-- `DROPLINK_MIN_UNIT_PRICE_USD=32`
-- `DROPLINK_MAX_UNIT_PRICE_USD=188`
 
 x402 and Tempo:
 
@@ -282,22 +217,6 @@ x402 and Tempo:
 - `TEMPO_SETTLEMENT_CONTRACT_ADDRESS`
 - `TEMPO_SETTLEMENT_PRIVATE_KEY`
 
-If x402 config is missing, new paid summons are refused. If Tempo config is missing, internal ledger state can still exist, but onchain settlement and payout actions are blocked. The app must never claim onchain settlement happened without a real transaction hash.
-
-## Manual Operator Flow
-
-1. Open `/admin`.
-2. Submit a public URL.
-3. Watch the live console for crawl, brand study, relic plan, Printful matching, print files, mockups, price book, OG image, and readiness.
-4. Open the generated DropLink page.
-5. Start claim and add `_droplink.<rootDomain>` TXT with the returned nonce.
-6. Verify claim.
-7. Configure payout later with Tempo wallet DNS proof or Stripe Connect.
-8. Publish only after readiness passes.
-9. Buy one edition through Stripe Checkout.
-10. Confirm the Stripe webhook sold exactly one edition, created one order, created one Printful draft order, and accrued ledger balances.
-11. Confirm the drop moves to `sold_out` after all 24 editions are sold.
-
 ## Contribution Rules
 
 - Keep the finite-drop invariant intact.
@@ -307,4 +226,4 @@ If x402 config is missing, new paid summons are refused. If Tempo config is miss
 - Do not fake payment, fulfillment, DNS ownership, or onchain settlement.
 - Keep generated product descriptors flexible, but keep operational states and ids explicit.
 - Add tests when changing canonicalization, checkout, economics, fulfillment, readiness, or webhook behavior.
-- Run `bun run typecheck`, `bun run check`, `bun test`, and `bun run build` before shipping.
+- Run `bun run typecheck`, `bun test`, and `bun run build` before shipping code changes.

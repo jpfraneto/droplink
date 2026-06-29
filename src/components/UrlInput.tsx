@@ -23,16 +23,22 @@ export function UrlInput() {
     setError(null);
 
     try {
-      const response = await fetch("/api/drops/from-url", {
+      const response = await fetch("/api/droplinks/summon", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url })
+        body: JSON.stringify({ submittedUrl: url })
       });
-      const data = (await response.json()) as { jobId?: string; error?: string };
-      if (!response.ok || !data.jobId) throw new Error(data.error || "Could not generate a drop.");
-      router.push(`/jobs/${data.jobId}`);
+      const data = (await response.json()) as { jobId?: string; slug?: string; error?: string };
+      if (!response.ok || !data.slug) {
+        throw new Error(
+          response.status === 401
+            ? "Scout mode currently requires admin access until public payments are enabled."
+            : data.error || "Could not scout this brand."
+        );
+      }
+      router.push(`/${data.slug}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not generate a drop.");
+      setError(err instanceof Error ? err.message : "Could not scout this brand.");
     } finally {
       setLoading(false);
     }
@@ -48,7 +54,7 @@ export function UrlInput() {
           aria-label="Public URL"
         />
         <button className="btn accent" type="submit" disabled={loading}>
-          {loading ? "generating..." : "generate merch drop"}
+          {loading ? "scouting..." : "scout brand"}
         </button>
       </form>
       {error ? <p className="error">{error}</p> : null}

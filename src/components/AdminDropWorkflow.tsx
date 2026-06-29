@@ -74,6 +74,10 @@ function assetFor(bundle: StorefrontBundle | null, relicId: string, type: Asset[
   return bundle?.assets.find((asset) => asset.relicId === relicId && asset.type === type) || null;
 }
 
+function collectionAssetFor(bundle: StorefrontBundle | null, type: Asset["type"]) {
+  return bundle?.assets.find((asset) => !asset.relicId && asset.type === type) || null;
+}
+
 function imageUrl(value: unknown) {
   return typeof value === "string" && /^https?:\/\//i.test(value) ? value : null;
 }
@@ -281,7 +285,7 @@ export function AdminDropWorkflow({
       <section className="admin-panel">
         <div className="admin-actions">
           <div>
-            <h2>Pipeline</h2>
+            <h2>Scout pipeline</h2>
             <p className="muted">{payload?.traceId || "waiting for trace"} {payload?.job ? `· ${payload.job.status}` : ""}</p>
           </div>
           <span className={`live-dot ${payload?.job?.status || "queued"}`}>{payload?.job?.currentStep || bundle?.storefront.generationStatus || "waiting"}</span>
@@ -301,6 +305,59 @@ export function AdminDropWorkflow({
         </div>
       </section>
 
+      {bundle?.brandStudy || bundle?.relicPlan ? (
+        <section className="admin-panel scout-thinking">
+          <div className="admin-actions">
+            <div>
+              <h2>Scout reading</h2>
+              <p className="muted">The distilled brand thesis and product thesis from this run.</p>
+            </div>
+          </div>
+          {bundle.brandStudy ? (
+            <div className="scout-reading-grid">
+              <div className="scout-reading-card wide">
+                <span>archetype</span>
+                <strong>{bundle.brandStudy.studyJson.archetype}</strong>
+                <p>{bundle.brandStudy.studyJson.essence}</p>
+              </div>
+              <div className="scout-reading-card wide">
+                <span>worldview</span>
+                <p>{bundle.brandStudy.studyJson.worldview}</p>
+              </div>
+              <div className="scout-reading-card">
+                <span>drop seed</span>
+                <p>{bundle.brandStudy.studyJson.drop_narrative_seed}</p>
+              </div>
+              <div className="scout-reading-card">
+                <span>avoid</span>
+                <div className="scout-tags">{bundle.brandStudy.studyJson.things_to_avoid.map((entry) => <em key={entry}>{entry}</em>)}</div>
+              </div>
+              <div className="scout-reading-card wide">
+                <span>invocation</span>
+                <p>{bundle.brandStudy.studyJson.invocation}</p>
+              </div>
+            </div>
+          ) : null}
+          {bundle.relicPlan ? (
+            <div className="scout-plan">
+              <h3>{bundle.relicPlan.planJson.collection_title}</h3>
+              <p>{bundle.relicPlan.planJson.collection_subtitle}</p>
+              <blockquote>{bundle.relicPlan.planJson.drop_concept}</blockquote>
+              <div className="scout-relics">
+                {bundle.relicPlan.planJson.relics.map((relic) => (
+                  <div className="scout-reading-card" key={relic.name}>
+                    <span>{relic.product_family}</span>
+                    <strong>{relic.name}</strong>
+                    <p>{relic.why_this_exists}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      {bundle?.drop ? <PromptAuditSection bundle={bundle} /> : null}
       {bundle?.drop ? <ManualImageSection bundle={bundle} /> : null}
 
       {bundle ? (
@@ -321,14 +378,17 @@ export function AdminDropWorkflow({
       ) : null}
 
       <section className="admin-panel">
-        <h2>Recent story</h2>
+        <h2>Scout trail</h2>
         <div className="workflow-events">
           {recentEvents.map((event) => (
-            <div className={`workflow-event ${event.level}`} key={event.id}>
-              <time>{time(event.createdAt)}</time>
-              <strong>{event.message}</strong>
-              <span>{event.eventType}</span>
-            </div>
+            <details className={`workflow-event ${event.level}`} key={event.id}>
+              <summary>
+                <time>{time(event.createdAt)}</time>
+                <strong>{event.message}</strong>
+                <span>{event.eventType}</span>
+              </summary>
+              <pre>{JSON.stringify(event.metadataJson || {}, null, 2)}</pre>
+            </details>
           ))}
           {!recentEvents.length ? <p className="muted">Waiting for the first pipeline event.</p> : null}
         </div>
@@ -372,6 +432,63 @@ function ReferenceImages({ references }: { references: ReferenceImage[] }) {
         <p className="muted">No reference images were captured for this prompt. Use only the written brand study and product direction.</p>
       )}
     </div>
+  );
+}
+
+function PromptAuditSection({ bundle }: { bundle: StorefrontBundle }) {
+  const ogAsset = collectionAssetFor(bundle, "og");
+  const ogPrompt = bundle.ogImage?.prompt || ogAsset?.prompt || "";
+  const ogReferences = ogReferenceImages(bundle);
+
+  return (
+    <section className="admin-panel prompt-audit">
+      <div className="admin-actions">
+        <div>
+          <h2>Image prompts</h2>
+          <p className="muted">Seven prompts for this DropLink: three raw Printful files, three product display images, and one OG share image.</p>
+        </div>
+      </div>
+      <div className="manual-image-grid prompt-audit-grid">
+        {bundle.relics.map((relic) => {
+          const printAsset = assetFor(bundle, relic.id, "print_file");
+          const lifestyleAsset = assetFor(bundle, relic.id, "lifestyle");
+          const printPrompt = printAsset?.prompt || relic.artDirection || "";
+          const lifestylePrompt = lifestyleAsset?.prompt || "";
+          return (
+            <div className="manual-image-card prompt-audit-card" key={`${relic.id}-prompts`}>
+              <strong>{relic.relicIndex}. {relic.name}</strong>
+              <label>
+                <span className="prompt-label">
+                  Raw Printful file prompt
+                  <CopyPromptButton text={printPrompt} />
+                </span>
+                <textarea readOnly value={printPrompt} />
+              </label>
+              <ReferenceImages references={productReferenceImages(printAsset)} />
+              <label>
+                <span className="prompt-label">
+                  Product display prompt
+                  <CopyPromptButton text={lifestylePrompt} />
+                </span>
+                <textarea readOnly value={lifestylePrompt || "Product display prompt will appear here after the raw print file prompt has been generated."} />
+              </label>
+              <ReferenceImages references={lifestyleReferenceImages(bundle, relic, printAsset)} />
+            </div>
+          );
+        })}
+        <div className="manual-image-card prompt-audit-card og">
+          <strong>OG share image</strong>
+          <label>
+            <span className="prompt-label">
+              OG prompt
+              <CopyPromptButton text={ogPrompt} />
+            </span>
+            <textarea readOnly value={ogPrompt || "OG prompt will appear here after the product images are ready."} />
+          </label>
+          <ReferenceImages references={ogReferences} />
+        </div>
+      </div>
+    </section>
   );
 }
 

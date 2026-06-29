@@ -28,7 +28,17 @@ const worker = new Worker<GenerationQueuePayload>(
     });
     return generateDropFromUrl(input.url, {
       jobId: input.jobId,
-      traceId: input.traceId
+      traceId: input.traceId,
+      brandId: input.brandId,
+      storefrontId: input.storefrontId,
+      collectionId: input.collectionId,
+      dropId: input.dropId,
+      slug: input.slug,
+      dnsClaimNonce: input.dnsClaimNonce,
+      summonerWallet: input.summonerWallet,
+      creatorDisplayName: input.creatorDisplayName,
+      summonPaymentTxHash: input.summonPaymentTxHash,
+      summonPaymentMetadataJson: input.summonPaymentMetadataJson
     });
   },
   {

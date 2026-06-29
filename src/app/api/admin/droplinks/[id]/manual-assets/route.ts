@@ -9,6 +9,8 @@ import { clearManualAsset, getDropBundleByDropId, recordEvent, updateManualOgIma
 import { putStoredObject } from "@/lib/storage";
 import type { Asset, OgImage, Relic } from "@/lib/types";
 
+const maxManualUploadBytes = 12 * 1024 * 1024;
+
 function checksum(input: Buffer) {
   return createHash("sha256").update(input).digest("hex");
 }
@@ -16,6 +18,7 @@ function checksum(input: Buffer) {
 async function fileBuffer(file: File) {
   if (!file || !file.size) throw new Error("Choose an image file.");
   if (!file.type.startsWith("image/")) throw new Error("Manual asset upload must be an image.");
+  if (file.size > maxManualUploadBytes) throw new Error("Manual image uploads must be 12MB or smaller.");
   return Buffer.from(await file.arrayBuffer());
 }
 

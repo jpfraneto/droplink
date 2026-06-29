@@ -312,15 +312,30 @@ function hermesAgentPrompt(input: {
 function parseHermesBridgeResponse(task: CreativeTask, body: unknown): CreativeTaskResult {
   const parsed = parseBridgeJsonPayload(body);
   if (task.type === "study_brand") {
-    const study = validateBrandStudy(objectProperty(parsed, "study") || parsed);
+    const studyPayload =
+      objectProperty(parsed, "study") ||
+      objectProperty(parsed, "brand_study") ||
+      objectProperty(parsed, "droplink_brand_study") ||
+      findObjectWithKeys(parsed, ["brand_name", "archetype", "visual_dna"]) ||
+      parsed;
+    const study = validateBrandStudy(studyPayload);
     return { type: "study_brand", study, modelVersion: bridgeModelVersion(body) };
   }
   if (task.type === "plan_relics") {
-    const plan = validateRelicPlan(objectProperty(parsed, "plan") || parsed, task.input.relicCount);
+    const planPayload =
+      objectProperty(parsed, "plan") ||
+      objectProperty(parsed, "relic_plan") ||
+      objectProperty(parsed, "droplink_relic_plan") ||
+      findObjectWithKeys(parsed, ["collection_title", "drop_concept", "relics"]) ||
+      parsed;
+    const plan = validateRelicPlan(planPayload, task.input.relicCount);
     return { type: "plan_relics", plan, modelVersion: bridgeModelVersion(body) };
   }
   const critiqueText = stringProperty(parsed, "critique_text") || stringProperty(parsed, "critique") || "";
-  const refinedPlan = objectProperty(parsed, "refined_plan") || objectProperty(parsed, "plan");
+  const refinedPlan =
+    objectProperty(parsed, "refined_plan") ||
+    objectProperty(parsed, "plan") ||
+    findObjectWithKeys(parsed, ["collection_title", "drop_concept", "relics"]);
   const relicCount = task.input.relicCount || 3;
   if (refinedPlan) {
     const plan = validateRelicPlan(refinedPlan, relicCount);
@@ -328,6 +343,17 @@ function parseHermesBridgeResponse(task: CreativeTask, body: unknown): CreativeT
   }
   const critique = validateRelicCritique(parsed, relicCount);
   return { type: "critique_relics", plan: critique.refined_plan, critique: critique.critique_text, modelVersion: bridgeModelVersion(body) };
+}
+
+function findObjectWithKeys(input: unknown, keys: string[], depth = 4): Record<string, unknown> | null {
+  if (!input || typeof input !== "object" || Array.isArray(input) || depth < 0) return null;
+  const record = input as Record<string, unknown>;
+  if (keys.every((key) => Object.prototype.hasOwnProperty.call(record, key))) return record;
+  for (const value of Object.values(record)) {
+    const found = findObjectWithKeys(value, keys, depth - 1);
+    if (found) return found;
+  }
+  return null;
 }
 
 async function parseHermesBridgeResponseOrRepair(input: {
@@ -370,13 +396,26 @@ function parseBridgeJsonPayload(body: unknown): unknown {
 
 function bridgeChatResponseText(body: unknown): string | undefined {
   const response = objectProperty(body, "response");
-  const choices = response && Array.isArray(response.choices) ? response.choices : null;
+  const top = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
+  const choices = response && Array.isArray(response.choices) ? response.choices : top && Array.isArray(top.choices) ? top.choices : null;
   const first = choices?.[0];
   if (!first || typeof first !== "object") return undefined;
   const message = (first as Record<string, unknown>).message;
   if (!message || typeof message !== "object") return undefined;
   const content = (message as Record<string, unknown>).content;
-  return typeof content === "string" ? content : undefined;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (!part || typeof part !== "object") return "";
+        const record = part as Record<string, unknown>;
+        return typeof record.text === "string" ? record.text : typeof record.content === "string" ? record.content : "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return undefined;
 }
 
 function rawBridgeResponseText(body: unknown): string | undefined {
@@ -424,12 +463,14 @@ async function repairHermesJsonResponse(input: {
       "content-type": "application/json",
       authorization: `Bearer ${input.bearerToken}`
     },
-    body: JSON.stringify({
-      mode: "chat",
-      prompt,
-      max_tokens: Number(process.env.HERMES_REPAIR_MAX_TOKENS || process.env.HERMES_BRIDGE_MAX_TOKENS || 3500),
-      temperature: 0
-    })
+    body: JSON.stringify(
+      hermesBridgeHttpBody(endpoint, {
+        mode: "chat",
+        prompt,
+        max_tokens: Number(process.env.HERMES_REPAIR_MAX_TOKENS || process.env.HERMES_BRIDGE_MAX_TOKENS || 3500),
+        temperature: 0
+      })
+    )
   });
   const body = await response.json().catch(async () => ({ error: await response.text().catch(() => "") }));
   if (!response.ok) throw new Error(`Hermes JSON repair returned ${response.status}: ${JSON.stringify(body).slice(0, 500)}`);
@@ -515,7 +556,7 @@ async function runHermesBridgeTask(task: CreativeTask): Promise<CreativeTaskResu
             "content-type": "application/json",
             authorization: `Bearer ${bearerToken}`
           },
-          body: JSON.stringify(request),
+          body: JSON.stringify(hermesBridgeHttpBody(endpoint, request)),
           signal: controller.signal
         });
         if (!response.ok) throw new Error(`Hermes bridge returned ${response.status}: ${await response.text()}`);
@@ -550,7 +591,7 @@ async function runHermesBridgeAsyncTask(input: {
           authorization: `Bearer ${input.bearerToken}`,
           "idempotency-key": idempotencyKey
         },
-        body: JSON.stringify(input.request)
+        body: JSON.stringify(hermesBridgeHttpBody(endpoint, input.request))
       });
       const submitBody = await submit.json().catch(async () => ({ error: await submit.text().catch(() => "") }));
       if (!submit.ok) throw new Error(`Hermes task submit returned ${submit.status}: ${JSON.stringify(submitBody).slice(0, 500)}`);
@@ -591,6 +632,18 @@ async function runHermesBridgeAsyncTask(input: {
       throw new Error(`Hermes task timed out after ${input.timeoutMs}ms: ${taskId}`);
     }
   );
+}
+
+function hermesBridgeHttpBody(endpoint: string, request: ReturnType<typeof hermesBridgeRequest> | { mode: string; prompt: string; max_tokens: number; temperature?: number }) {
+  if (endpoint.endsWith("/v1/chat/completions") || endpoint.endsWith("/chat/completions")) {
+    return {
+      model: process.env.HERMES_BRIDGE_MODEL || "qwen3.6-27b-q4_k_m.gguf",
+      messages: [{ role: "user", content: request.prompt }],
+      max_tokens: request.max_tokens,
+      temperature: "temperature" in request && request.temperature != null ? request.temperature : 0
+    };
+  }
+  return request;
 }
 
 function hermesTaskIdempotencyKey(task: CreativeTask, request: ReturnType<typeof hermesBridgeRequest>) {

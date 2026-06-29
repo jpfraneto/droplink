@@ -16,7 +16,7 @@ export type ScrapedPage = {
   textSample: string;
 };
 
-const maxBytes = 900_000;
+const maxBytes = 2_500_000;
 
 const socialHosts = [
   "x.com",
@@ -37,6 +37,38 @@ const socialHosts = [
 
 function cleanText(input: string | undefined | null) {
   return (input || "").replace(/\s+/g, " ").trim();
+}
+
+function fallbackPage(inputUrl: URL, finalUrl: string, reason: string): ScrapedPage {
+  const final = new URL(finalUrl);
+  const domain = final.hostname.replace(/^www\./, "");
+  const label = domain
+    .replace(/\..*/, "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return {
+    url: inputUrl.toString(),
+    finalUrl,
+    domain,
+    title: label || domain,
+    description: domain,
+    ogImage: undefined,
+    favicon: new URL("/favicon.ico", finalUrl).toString(),
+    headings: [],
+    discoveredLinks: [],
+    visualEvidence: [
+      {
+        url: new URL("/favicon.ico", finalUrl).toString(),
+        sourcePage: finalUrl,
+        kind: "favicon",
+        width: null,
+        height: null,
+        score: 1,
+        reason: "Conventional favicon fallback because the public page could not be read."
+      }
+    ],
+    textSample: `The public homepage for ${domain} could not be read by the crawler: ${reason}. Continue with cautious domain-level interpretation only.`
+  };
 }
 
 function linkKind(url: string, rel = "", label = ""): BrandDiscoveryLink["kind"] {
@@ -101,6 +133,10 @@ export async function scrapePublicPage(inputUrl: string): Promise<ScrapedPage> {
       }
     });
 
+    if (!response.ok && [401, 403, 429].includes(response.status)) {
+      return fallbackPage(url, response.url || url.toString(), `HTTP ${response.status}`);
+    }
+
     if (!response.ok) {
       throw new Error(`The page returned ${response.status}.`);
     }
@@ -119,7 +155,12 @@ export async function scrapePublicPage(inputUrl: string): Promise<ScrapedPage> {
       const { done, value } = await reader.read();
       if (done) break;
       total += value.length;
-      if (total > maxBytes) throw new Error("That page is too large for the demo reader.");
+      if (total > maxBytes) {
+        const allowed = Math.max(0, value.length - (total - maxBytes));
+        if (allowed > 0) chunks.push(value.slice(0, allowed));
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
       chunks.push(value);
     }
 
@@ -139,7 +180,12 @@ export async function scrapePublicPage(inputUrl: string): Promise<ScrapedPage> {
       cleanText($("h1").first().text()) ||
       "";
     const ogImage = $("meta[property='og:image']").attr("content");
-    const favicon = $("link[rel='icon']").attr("href") || $("link[rel='shortcut icon']").attr("href");
+    const favicon =
+      $("link[rel~='icon']").first().attr("href") ||
+      $("link[rel='shortcut icon']").first().attr("href") ||
+      $("link[rel='apple-touch-icon']").first().attr("href") ||
+      $("link[rel='apple-touch-icon-precomposed']").first().attr("href") ||
+      "/favicon.ico";
     const headings = $("h1, h2")
       .map((_, element) => cleanText($(element).text()))
       .get()

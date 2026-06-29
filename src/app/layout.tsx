@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "DropLink",
-  description: "Paste any link. Get a merch drop.",
+  description: "Finite merch drops for verified domains.",
   metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000")
 };
 

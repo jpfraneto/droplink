@@ -19,7 +19,14 @@ export async function POST(request: Request, { params }: { params: { id: string 
     const body = schema.parse(await request.json());
     const bundle = await getDropBundleByDropId(params.id);
     if (!bundle?.drop) return NextResponse.json({ error: "DropLink not found." }, { status: 404 });
-    if (bundle.drop.status !== "published") return NextResponse.json({ error: "This DropLink is not published for commerce." }, { status: 403 });
+    if (
+      bundle.drop.status !== "published" ||
+      bundle.drop.domainClaimStatus !== "verified" ||
+      bundle.drop.publishStatus !== "published" ||
+      bundle.storefront.commerceMode !== "platform_checkout"
+    ) {
+      return NextResponse.json({ error: "This DropLink is preview-only until the domain owner verifies and activates it." }, { status: 403 });
+    }
     if (!bundle.relics.some((relic) => relic.id === body.relicId)) return NextResponse.json({ error: "Relic does not belong to this DropLink." }, { status: 400 });
     const result = await createRelicCheckoutSession({
       relicId: body.relicId,

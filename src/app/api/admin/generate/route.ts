@@ -32,8 +32,8 @@ export async function POST(request: Request) {
       url: body.url
     });
     if (contentType.includes("application/json")) return NextResponse.json({ jobId: job.id, traceId: job.traceId });
-    const expectedSlug = brandSlugFromUrl(withDefaultHttpsScheme(body.url));
-    return redirectTo(request, `/admin/${expectedSlug}?job=${job.id}`);
+    const slug = typeof job.inputJson.slug === "string" ? job.inputJson.slug : brandSlugFromUrl(withDefaultHttpsScheme(body.url));
+    return redirectTo(request, `/admin/${slug}?job=${job.id}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Generation failed.";
     logger.error("admin.generate.failed", { error: message, url: body.url });

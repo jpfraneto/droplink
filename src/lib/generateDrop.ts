@@ -10,7 +10,7 @@ import { bestVisualReferences, buildBrandDiscoveryDossier } from "./brandDiscove
 import { canonicalizeDropUrl } from "./dropCanonicalization";
 import { assertFiniteDropConfig, dropConfig } from "./env";
 import { newId } from "./hashes";
-import { generateOpenAIProductImage, manualImageMode } from "./imageProvider";
+import { generateImage, manualImageMode } from "./imageProvider";
 import { relicMockupSvg } from "./mockups";
 import { ogPng as createOgPng } from "./og";
 import { buildDropPriceBook } from "./pricing";
@@ -102,7 +102,7 @@ async function pngMetadata(buffer: Buffer) {
   };
 }
 
-async function productArtBuffer(brand: Brand, relic: Relic, prompt: string) {
+async function productArtBuffer(brand: Brand, relic: Relic, prompt: string, options: { width?: number; height?: number } = {}) {
   if (manualImageMode()) {
     const svg = relicMockupSvg(brand, relic);
     return {
@@ -111,8 +111,8 @@ async function productArtBuffer(brand: Brand, relic: Relic, prompt: string) {
       provider: "manual_chatgpt"
     };
   }
-  const generated = await generateOpenAIProductImage(prompt);
-  if (generated) return { buffer: generated, validationStatus: "valid" as const, provider: "openai" };
+  const generated = await generateImage(prompt, options);
+  if (generated) return { buffer: generated.buffer, validationStatus: "valid" as const, provider: generated.provider };
   if (process.env.NODE_ENV === "production" || process.env.ALLOW_MOCKS !== "true") {
     throw new Error(`Image generation failed for ${relic.name}.`);
   }
@@ -147,11 +147,21 @@ async function event(
   });
 }
 
+function excerpt(input: string | undefined | null, length = 700) {
+  return (input || "").replace(/\s+/g, " ").trim().slice(0, length);
+}
+
 export async function generateDropFromUrl(
   url: string,
   options: {
     jobId?: string;
     traceId?: string;
+    brandId?: string;
+    storefrontId?: string;
+    collectionId?: string;
+    dropId?: string;
+    slug?: string;
+    dnsClaimNonce?: string;
     summonerWallet?: string | null;
     creatorDisplayName?: string | null;
     summonPaymentTxHash?: string | null;
@@ -166,13 +176,13 @@ export async function generateDropFromUrl(
   const hostname = canonicalTarget.canonicalRootDomain || canonicalTarget.canonicalDomain || domainFromUrl(canonicalUrl);
   const traceId = options.traceId || newId("run");
   const now = new Date().toISOString();
-  const dropId = `drop_${canonicalTarget.rootDomainHash.slice(0, 24)}`;
-  const brandId = newId("brand");
-  const storefrontId = newId("store");
-  const collectionId = newId("col");
+  const dropId = options.dropId || `drop_${canonicalTarget.rootDomainHash.slice(0, 24)}`;
+  const brandId = options.brandId || newId("brand");
+  const storefrontId = options.storefrontId || newId("store");
+  const collectionId = options.collectionId || newId("col");
   const relicCount = dropConfig.relicsPerDrop;
-  const baseSlug = brandSlugFromUrl(canonicalUrl);
-  const slug = uniqueSlug(baseSlug, await existingStorefrontSlugs());
+  const baseSlug = brandSlugFromUrl(`https://${hostname}`);
+  const slug = options.slug || uniqueSlug(baseSlug, await existingStorefrontSlugs());
 
   const brand: Brand = {
     id: brandId,
@@ -199,7 +209,7 @@ export async function generateDropFromUrl(
     updatedAt: now,
     publishedAt: null
   };
-  const dnsClaimNonce = newId("dns").replace(/^dns_/, "");
+  const dnsClaimNonce = options.dnsClaimNonce || newId("dns").replace(/^dns_/, "");
   const drop: Drop = {
     id: dropId,
     storefrontId,
@@ -305,7 +315,13 @@ export async function generateDropFromUrl(
     eventType: "url_intake_created",
     level: "info",
     message: "URL intake created.",
-    metadataJson: { url: canonicalUrl, slug },
+    metadataJson: {
+      submittedUrl: canonicalTarget.originalSubmittedUrl,
+      canonicalUrl,
+      sourceUrl,
+      canonicalRootDomain: hostname,
+      slug
+    },
     requestId: null,
     traceId
   });
@@ -313,19 +329,39 @@ export async function generateDropFromUrl(
   try {
     await event(storefrontId, "crawl_started", "CRAWLING", traceId, "Crawling source URL.", {}, job.id);
     const page = await scrapePublicPage(sourceUrl);
-    await event(storefrontId, "crawl_succeeded", "CRAWLED", traceId, "Source URL crawled.", { title: page.title }, job.id);
+    const crawlerFallback = page.textSample.includes("could not be read by the crawler");
+    await event(storefrontId, "crawl_succeeded", "CRAWLED", traceId, crawlerFallback ? "Source URL blocked the crawler; continuing with domain metadata." : "Source URL crawled.", {
+      finalUrl: page.finalUrl,
+      title: page.title,
+      description: page.description,
+      headings: page.headings.slice(0, 8),
+      textSample: excerpt(page.textSample, 900),
+      discoveredLinks: page.discoveredLinks.slice(0, 8),
+      visualEvidence: page.visualEvidence.slice(0, 8),
+      crawlerFallback
+    }, job.id);
     await event(storefrontId, "brand_discovery_started", "DISCOVERING_BRAND", traceId, "Discovering brand neighborhood and visual evidence.", {}, job.id);
     const discoveryDossier = buildBrandDiscoveryDossier({ page, canonicalRootDomain: hostname });
     const visualReferences = bestVisualReferences(discoveryDossier, 8);
     await event(storefrontId, "brand_discovery_succeeded", "BRAND_DISCOVERED", traceId, "Brand discovery completed.", {
       discoveredLinks: discoveryDossier.discoveredLinks.length,
       visualEvidence: discoveryDossier.visualEvidence.length,
-      strongVisualReferences: visualReferences.length
+      strongVisualReferences: visualReferences.length,
+      repeatedPhrases: discoveryDossier.textSignals.repeatedPhrases,
+      pagesVisited: discoveryDossier.debug.pagesVisited,
+      blockedUrls: discoveryDossier.debug.blockedUrls.slice(0, 8)
     }, job.id);
     await event(storefrontId, "brand_dossier_started", "BUILDING_DOSSIER", traceId, "Building brand dossier from discovered evidence.", {}, job.id);
     await event(storefrontId, "brand_dossier_ready", "DOSSIER_READY", traceId, "Brand dossier ready for Hermes distillation.", {
       socialLinks: discoveryDossier.discoveredLinks.filter((link) => link.kind === "social" || link.kind === "same_as").slice(0, 8),
-      topVisualEvidence: visualReferences.slice(0, 6)
+      topVisualEvidence: visualReferences.slice(0, 6),
+      textSignals: {
+        title: discoveryDossier.textSignals.title,
+        description: discoveryDossier.textSignals.description,
+        headings: discoveryDossier.textSignals.headings.slice(0, 8),
+        repeatedPhrases: discoveryDossier.textSignals.repeatedPhrases,
+        textSample: excerpt(discoveryDossier.textSignals.textSample, 900)
+      }
     }, job.id);
     const snapshot: BrandSnapshot = {
       id: newId("snap"),
@@ -338,11 +374,35 @@ export async function generateDropFromUrl(
     };
 
     await event(storefrontId, "brand_study_started", "DISTILLING", traceId, "Brand study started.", {}, job.id);
+    await event(storefrontId, "hermes_brand_study_requested", "DISTILLING", traceId, "Hermes is distilling the brand into a creative source.", {
+      evidenceCount: discoveryDossier.visualEvidence.length,
+      neighborhoodLinks: discoveryDossier.discoveredLinks.slice(0, 10),
+      textSignals: {
+        title: discoveryDossier.textSignals.title,
+        description: discoveryDossier.textSignals.description,
+        repeatedPhrases: discoveryDossier.textSignals.repeatedPhrases
+      }
+    }, job.id);
     const studiedTask = await callHermesForCreativeTask({ type: "study_brand", input: { ...page, discoveryDossier, traceId } });
     if (studiedTask.type !== "study_brand") throw new Error("Hermes returned the wrong result type for brand study.");
     const studied = { study: studiedTask.study, modelVersion: studiedTask.modelVersion };
     brand.name = studied.study.brand_name;
-    await event(storefrontId, "brand_study_succeeded", "DISTILLED", traceId, "Brand study generated.", {}, job.id);
+    await event(storefrontId, "brand_study_succeeded", "DISTILLED", traceId, "Brand study generated.", {
+      modelVersion: studied.modelVersion,
+      brandName: studied.study.brand_name,
+      archetype: studied.study.archetype,
+      essence: studied.study.essence,
+      worldview: studied.study.worldview,
+      emotionalPosture: studied.study.emotional_posture,
+      dropNarrativeSeed: studied.study.drop_narrative_seed,
+      aestheticMotifs: studied.study.aesthetic_motifs,
+      colorPalette: studied.study.color_palette,
+      whatTheyCareAbout: studied.study.what_they_care_about,
+      whatTheyBringToTheWorld: studied.study.what_they_bring_to_the_world,
+      thingsToAvoid: studied.study.things_to_avoid,
+      visualDna: studied.study.visual_dna,
+      invocation: excerpt(studied.study.invocation, 1200)
+    }, job.id);
     const brandStudy: BrandStudy = {
       id: newId("study"),
       brandId,
@@ -355,6 +415,10 @@ export async function generateDropFromUrl(
 
     await event(storefrontId, "relic_plan_started", "PLANNING_RELICS", traceId, "Relic planning started.", {}, job.id);
     const printfulCatalogOptions = await printfulCatalogOptionsForPlanning({ traceId });
+    await event(storefrontId, "printful_catalog_loaded", "PLANNING_RELICS", traceId, "Loaded Printful catalog options for the relic planner.", {
+      optionCount: printfulCatalogOptions.length,
+      options: printfulCatalogOptions.slice(0, 12)
+    }, job.id);
     const initialPlanTask = await callHermesForCreativeTask({
       type: "plan_relics",
       input: { study: studied.study, relicCount: 3, collectionType: "drop", printfulCatalogOptions, traceId }
@@ -362,7 +426,16 @@ export async function generateDropFromUrl(
     if (initialPlanTask.type !== "plan_relics") throw new Error("Hermes returned the wrong result type for relic planning.");
     await event(storefrontId, "relic_plan_drafted", "PLANNING_RELICS", traceId, "Initial relic triptych drafted.", {
       relicCount: initialPlanTask.plan.relics.length,
-      dropConcept: initialPlanTask.plan.drop_concept
+      collectionTitle: initialPlanTask.plan.collection_title,
+      collectionSubtitle: initialPlanTask.plan.collection_subtitle,
+      dropConcept: initialPlanTask.plan.drop_concept,
+      dropLore: initialPlanTask.plan.drop_lore,
+      relics: initialPlanTask.plan.relics.map((relic) => ({
+        name: relic.name,
+        roleInTriptych: relic.role_in_triptych,
+        productFamily: relic.product_family,
+        whyThisExists: relic.why_this_exists
+      }))
     }, job.id);
     const refinedPlanTask = await callHermesForCreativeTask({
       type: "critique_relics",
@@ -385,7 +458,21 @@ export async function generateDropFromUrl(
     const relicCritique = refinedPlanTask.critique;
     await event(storefrontId, "relic_plan_succeeded", "RELICS_PLANNED", traceId, "Relic plan critiqued and refined.", {
       relicCount: planned.plan.relics.length,
+      collectionTitle: planned.plan.collection_title,
+      collectionSubtitle: planned.plan.collection_subtitle,
       dropConcept: planned.plan.drop_concept,
+      dropLore: planned.plan.drop_lore,
+      relics: planned.plan.relics.map((relic) => ({
+        name: relic.name,
+        archetype: relic.archetype,
+        roleInTriptych: relic.role_in_triptych,
+        productFamily: relic.product_family,
+        description: relic.description,
+        whyThisExists: relic.why_this_exists,
+        artDirection: relic.art_direction,
+        suggestedPriceCents: relic.suggested_price_cents,
+        printfulProductKey: relic.printful_product_key
+      })),
       critique: relicCritique
     }, job.id);
     const collection: Collection = {
@@ -451,7 +538,19 @@ export async function generateDropFromUrl(
         updatedAt: now
       };
     });
-    await event(storefrontId, "printful_matched", "PRINTFUL_MATCHED", traceId, "All products matched to fixed Printful catalog variants.", {}, job.id);
+    await event(storefrontId, "printful_matched", "PRINTFUL_MATCHED", traceId, "All products matched to fixed Printful catalog variants.", {
+      selections: selectedVariants.map((selection, index) => ({
+        relicName: planned.plan.relics[index]?.name,
+        productId: selection.product.id,
+        productName: selection.product.name,
+        variantId: selection.variant.id,
+        variantName: selection.variant.name,
+        placement: selection.placement,
+        technique: selection.technique,
+        productCategory: selection.productCategory,
+        selectionReason: selection.selectionReason
+      }))
+    }, job.id);
 
     await event(storefrontId, "print_files_started", "GENERATING_PRINT_FILES", traceId, "Generating print files.", {}, job.id);
     const manuallyGeneratedImages = manualImageMode();
@@ -504,7 +603,17 @@ export async function generateDropFromUrl(
         page.favicon ? `Optional favicon reference: ${page.favicon}` : "",
         "Avoid trademarked logos unless they are visibly present in the public source. Final answer must be raw design only: no mockup, no shirt body, no background scene."
       ].filter(Boolean).join("\n");
-      const generated = await productArtBuffer(brand, relic, prompt);
+      await event(storefrontId, "relic_print_prompt_ready", "GENERATING_PRINT_FILES", traceId, `Print artwork prompt prepared for ${relic.name}.`, {
+        relicId: relic.id,
+        relicIndex: relic.relicIndex,
+        relicName: relic.name,
+        productName: selection.product.name,
+        variantName: selection.variant.name,
+        artDirection: relic.artDirection,
+        visualReferences: visualReferences.slice(0, 6),
+        promptExcerpt: excerpt(prompt, 1600)
+      }, job.id);
+      const generated = await productArtBuffer(brand, relic, prompt, { width: 1024, height: 1024 });
       const normalizedPng = await sharp(generated.buffer).png({ compressionLevel: 9 }).toBuffer();
       const previewWebp = await sharp(normalizedPng)
         .resize({ width: 900, height: 900, fit: "inside", withoutEnlargement: true })
@@ -541,6 +650,18 @@ export async function generateDropFromUrl(
       const printfulReferenceImageUrl = printfulCatalogImageUrl(fulfillmentSpec.rawPrintfulCatalogSnapshotJson);
       relic.fulfillmentSpecJson = fulfillmentSpec;
       relic.priceCents = Math.max(relic.priceCents, Math.round(Number(fulfillmentSpec.retailPriceUsd) * 100));
+      await event(storefrontId, "relic_fulfillment_spec_ready", "GENERATING_PRINT_FILES", traceId, `Fulfillment spec selected for ${relic.name}.`, {
+        relicId: relic.id,
+        relicName: relic.name,
+        productName: fulfillmentSpec.productName,
+        variantName: fulfillmentSpec.variantName,
+        placement: fulfillmentSpec.placement,
+        technique: fulfillmentSpec.technique,
+        retailPriceUsd: fulfillmentSpec.retailPriceUsd,
+        estimatedPrintfulCostUsd: fulfillmentSpec.estimatedPrintfulCostUsd,
+        selectionReason: fulfillmentSpec.selectionReason,
+        printfulProductImageUrl: printfulReferenceImageUrl
+      }, job.id);
       const printFile: Asset = {
         id: printAssetId,
         collectionId,
@@ -651,7 +772,14 @@ export async function generateDropFromUrl(
         "Do not include the words DropLink, relic, edition, triptych, SKU, 1/3, 2/3, 3/3, #1, #2, or #3 as visible text.",
         `Avoid: ${studied.study.things_to_avoid.join(", ")}`
       ].filter(Boolean).join("\n");
-      const lifestyleGenerated = await productArtBuffer(brand, relic, lifestylePrompt);
+      await event(storefrontId, "lifestyle_prompt_ready", "GENERATING_LIFESTYLE_IMAGES", traceId, `Product-in-use prompt prepared for ${relic.name}.`, {
+        relicId: relic.id,
+        relicName: relic.name,
+        productName: fulfillmentSpec.productName,
+        variantName: fulfillmentSpec.variantName,
+        promptExcerpt: excerpt(lifestylePrompt, 1400)
+      }, job.id);
+      const lifestyleGenerated = await productArtBuffer(brand, relic, lifestylePrompt, { width: 1024, height: 1024 });
       const lifestylePng = await sharp(lifestyleGenerated.buffer)
         .resize({ width: 1200, height: 1200, fit: "cover" })
         .png({ compressionLevel: 9 })
@@ -760,7 +888,16 @@ export async function generateDropFromUrl(
     }
     await event(storefrontId, "price_book_generated", "PRINT_FILES_VALID", traceId, "Draft price book and projected economics generated.", {
       projectedDomainOwnerProceedsUsd: priceBook.totals.projectedDomainOwnerProceedsUsd,
-      maxGrossRevenueUsd: priceBook.totals.maxGrossRevenueUsd
+      maxGrossRevenueUsd: priceBook.totals.maxGrossRevenueUsd,
+      estimatedTotalPrintfulCostUsd: priceBook.totals.estimatedTotalPrintfulCostUsd,
+      estimatedTotalNetMarginUsd: priceBook.totals.estimatedTotalNetMarginUsd,
+      relics: priceBook.relics.map((price) => ({
+        relicName: price.relicName,
+        unitPriceUsd: price.unitPriceUsd,
+        estimatedUnitPrintfulCostUsd: price.estimatedUnitPrintfulCostUsd,
+        estimatedUnitNetMarginUsd: price.estimatedUnitNetMarginUsd,
+        pricingReason: price.pricingReason
+      }))
     }, job.id);
 
     await event(storefrontId, "og_generation_started", "GENERATING_OG", traceId, "OG image generation started.", {}, job.id);
@@ -785,11 +922,20 @@ export async function generateDropFromUrl(
       "Do not include the words DropLink, relic, edition, triptych, SKU, 1/3, 2/3, 3/3, #1, #2, or #3 as visible text.",
       "Make it feel like one coherent brand release, not a collage of unrelated mockups."
     ].join("\n");
+    await event(storefrontId, "og_prompt_ready", "GENERATING_OG", traceId, "Share image prompt prepared.", {
+      collectionTitle: collection.title,
+      collectionSubtitle: collection.subtitle,
+      sourceLifestyleImageUrls: relics.map((relic) => assets.find((asset) => asset.relicId === relic.id && asset.type === "lifestyle")?.url).filter(Boolean),
+      promptExcerpt: excerpt(ogPrompt, 1400)
+    }, job.id);
     const lifestyleImageUrls = relics.map((relic) => assets.find((asset) => asset.relicId === relic.id && asset.type === "lifestyle")?.url);
-    const ogPng = await createOgPng(brand, collection, relics, {
-      imageUrls: relics.map((relic, index) => lifestyleImageUrls[index] || mockups.find((mockup) => mockup.relicId === relic.id)?.imageUrl),
-      publicPath: hostname
-    });
+    const generatedOg = manuallyGeneratedImages ? null : await generateImage(ogPrompt, { width: 1216, height: 640 });
+    const ogPng = generatedOg
+      ? await sharp(generatedOg.buffer).resize({ width: 1200, height: 630, fit: "cover" }).png({ compressionLevel: 9 }).toBuffer()
+      : await createOgPng(brand, collection, relics, {
+          imageUrls: relics.map((relic, index) => lifestyleImageUrls[index] || mockups.find((mockup) => mockup.relicId === relic.id)?.imageUrl),
+          publicPath: hostname
+        });
     const ogWebp = await sharp(ogPng).webp({ quality: 82 }).toBuffer();
     const ogChecksum = checksumBuffer(ogPng);
     const ogWebpChecksum = checksumBuffer(ogWebp);
@@ -822,7 +968,7 @@ export async function generateDropFromUrl(
         contentType: "image/png",
         storageKey: ogObject.key,
         byteSize: ogObject.byteSize,
-        imageProvider: manuallyGeneratedImages ? "manual_chatgpt" : "sharp_composite",
+        imageProvider: manuallyGeneratedImages ? "manual_chatgpt" : generatedOg?.provider || "sharp_composite",
         manualUploadRequired: manuallyGeneratedImages,
         sourceRelicIds: relics.map((relic) => relic.id),
         sourceLifestyleImageUrls: lifestyleImageUrls

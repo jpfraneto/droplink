@@ -2,7 +2,7 @@ import Link from "next/link";
 
 export const metadata = {
   title: "About DropLink",
-  description: "DropLink turns a root domain into one finite merch market."
+  description: "Anyone can scout a DropLink. Only owners can sell."
 };
 
 export default function AboutPage() {
@@ -12,22 +12,23 @@ export default function AboutPage() {
         <a className="about-agent-link" href="/about.md">
           if you are an agent read here /about.md
         </a>
-        <h1>DropLink turns a root domain into one finite merch market.</h1>
+        <h1>Anyone can scout. Only owners can sell.</h1>
         <p>
-          Paste a link. DropLink resolves the root domain, generates three merch relics, and mints eight editions of
-          each. That is the whole market: 24 physical objects. When they sell out, the drop is complete forever.
+          DropLink lets anyone scout a merch drop for a brand on the internet.
         </p>
         <p>
-          Anyone can summon a domain. The summoner pays 8 USDC to process it and becomes the discoverer. If the verified
-          domain owner later claims the DropLink with DNS, the summoner earns 8% of the net revenue from sales.
+          A scouted DropLink is only a preview. The real domain owner must claim it before anything can be sold.
         </p>
         <p>
-          DNS is ownership. Payout is a setting. The domain owner claims with a TXT record, then chooses Tempo USDC or
-          Stripe Connect for payouts. Unclaimed drops can be seen, but they cannot sell.
+          Every live DropLink has 3 products: Wear, Display, Use. Each has 8 units.
         </p>
         <p>
-          Stripe handles checkout. Printful makes the object. DropLink records the economics: projected before the first
-          sale, settled after each paid order.
+          Scouts pay 8 USDC through x402 to create a preview. If the verified owner later claims and activates the
+          DropLink, a third-party scout can receive 8% of future revenue. The owner receives 92%. If the owner scouted
+          and claimed their own DropLink, the owner receives 100%.
+        </p>
+        <p>
+          DropLink is a hackathon project by <a href="https://x.com/jpfraneto" target="_blank" rel="noreferrer">@jpfraneto</a>.
         </p>
         <p>
           <Link href="/">back to droplink</Link>

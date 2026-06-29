@@ -1,12 +1,27 @@
 import { Queue, QueueEvents, type ConnectionOptions, type JobsOptions } from "bullmq";
+import { canonicalizeDropUrl } from "./dropCanonicalization";
+import { assertFiniteDropConfig, dropConfig } from "./env";
 import { newId } from "./hashes";
 import { logger } from "./logger";
-import { createGenerationJob, recordEvent, updateGenerationJobStep } from "./store";
+import { brandSlugFromUrl, uniqueSlug } from "./slugs";
+import { createGenerationJob, existingStorefrontSlugs, recordEvent, saveScoutShell, updateGenerationJobStep } from "./store";
+import { domainFromUrl, normalizePublicUrl } from "./urls";
+import type { Drop, DropSourceSignal } from "./types";
 
 export type GenerationQueuePayload = {
   jobId: string;
   traceId: string;
   url: string;
+  brandId?: string;
+  storefrontId?: string;
+  collectionId?: string;
+  dropId?: string;
+  slug?: string;
+  dnsClaimNonce?: string;
+  summonerWallet?: string | null;
+  creatorDisplayName?: string | null;
+  summonPaymentTxHash?: string | null;
+  summonPaymentMetadataJson?: Record<string, unknown> | null;
 };
 
 let connection: ConnectionOptions | null = null;
@@ -70,17 +85,151 @@ export function defaultGenerationJobOptions(): JobsOptions {
 export async function enqueueGeneration(input: {
   url: string;
   requestId?: string | null;
+  summonerWallet?: string | null;
+  creatorDisplayName?: string | null;
+  summonPaymentTxHash?: string | null;
+  summonPaymentMetadataJson?: Record<string, unknown> | null;
 }) {
+  assertFiniteDropConfig();
   const traceId = newId("run");
+  const canonicalTarget = canonicalizeDropUrl(input.url);
+  await normalizePublicUrl(input.url);
+  const canonicalUrl = canonicalTarget.canonicalUrl;
+  const sourceUrl = canonicalTarget.sourceUrl;
+  const hostname = canonicalTarget.canonicalRootDomain || canonicalTarget.canonicalDomain || domainFromUrl(canonicalUrl);
+  const dropId = `drop_${canonicalTarget.rootDomainHash.slice(0, 24)}`;
+  const brandId = newId("brand");
+  const storefrontId = newId("store");
+  const collectionId = newId("col");
+  const dnsClaimNonce = newId("dns").replace(/^dns_/, "");
+  const slug = uniqueSlug(brandSlugFromUrl(`https://${hostname}`), await existingStorefrontSlugs());
   const job = await createGenerationJob({
     traceId,
     type: "drop",
-    inputJson: { url: input.url, type: "drop", queue: GENERATION_QUEUE_NAME }
+    inputJson: {
+      url: canonicalUrl,
+      sourceUrl,
+      type: "drop",
+      queue: GENERATION_QUEUE_NAME,
+      slug,
+      storefrontId,
+      dropId
+    }
+  });
+  const now = new Date().toISOString();
+  const drop: Drop = {
+    id: dropId,
+    storefrontId,
+    originalSubmittedUrl: canonicalTarget.originalSubmittedUrl,
+    submittedHost: canonicalTarget.submittedHost,
+    submittedPath: canonicalTarget.submittedPath,
+    sourceUrl,
+    canonicalUrl,
+    canonicalDomain: hostname,
+    canonicalRootDomain: canonicalTarget.canonicalRootDomain,
+    registrableDomain: canonicalTarget.registrableDomain,
+    rootDomainHash: canonicalTarget.rootDomainHash,
+    domainHash: canonicalTarget.rootDomainHash,
+    status: "summoned",
+    domainClaimStatus: "unclaimed",
+    payoutStatus: "missing",
+    payoutMethod: "none",
+    publishStatus: "blocked",
+    summonerWallet: input.summonerWallet || null,
+    creatorDisplayName: input.creatorDisplayName || null,
+    summonPaymentTxHash: input.summonPaymentTxHash || null,
+    summonPaymentMetadataJson: input.summonPaymentMetadataJson || null,
+    summonPriceUsdc: dropConfig.summonPriceUsdc,
+    creatorBountyBps: dropConfig.creatorBountyBps,
+    protocolFeeBps: dropConfig.protocolFeeBps,
+    totalSupply: dropConfig.totalSupply,
+    relicsPerDrop: dropConfig.relicsPerDrop,
+    editionsPerRelic: dropConfig.editionsPerRelic,
+    dnsClaimNonce,
+    dnsRecordName: `_droplink.${hostname}`,
+    dnsRecordValue: `droplink-claim=${dnsClaimNonce}`,
+    domainOwnerName: null,
+    domainOwnerWallet: null,
+    domainOwnerEmail: null,
+    domainClaimProofJson: null,
+    domainClaimedAt: null,
+    tempoWalletAddress: null,
+    tempoWalletVerifiedAt: null,
+    tempoWalletVerificationProofJson: null,
+    payoutNonce: null,
+    payoutDnsRecordName: null,
+    payoutDnsRecordValue: null,
+    stripeConnectAccountId: null,
+    stripeConnectStatus: null,
+    stripeConnectOnboardingUrl: null,
+    stripeConnectVerifiedAt: null,
+    payoutConfiguredAt: null,
+    priceBookJson: null,
+    projectedEconomicsJson: null,
+    priceBookLockedAt: null,
+    publishedAt: null,
+    soldOutAt: null,
+    archivedAt: null,
+    readinessJson: null,
+    createdAt: now,
+    updatedAt: now
+  };
+  const sourceSignal: DropSourceSignal = {
+    id: newId("sig"),
+    dropId,
+    submittedUrl: canonicalTarget.originalSubmittedUrl,
+    submittedHost: canonicalTarget.submittedHost,
+    submittedPath: canonicalTarget.submittedPath,
+    normalizedUrl: sourceUrl,
+    submittedByWallet: input.summonerWallet || null,
+    submittedAt: now,
+    usedForGeneration: true,
+    signalMetadataJson: { reason: "initial summon source" }
+  };
+  await saveScoutShell({
+    brand: {
+      id: brandId,
+      canonicalUrl: `https://${hostname}/`,
+      hostname,
+      slug,
+      name: hostname.replace(/\..*/, "").replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
+      createdAt: now,
+      updatedAt: now
+    },
+    storefront: {
+      id: storefrontId,
+      brandId,
+      slug,
+      status: "summoned",
+      claimStatus: "unclaimed",
+      commerceMode: "preview",
+      commissionBps: 0,
+      customDomain: null,
+      stripeConnectedAccountId: null,
+      generationStatus: "INTAKE_CREATED",
+      generationTraceId: traceId,
+      createdAt: now,
+      updatedAt: now,
+      publishedAt: null
+    },
+    drop,
+    sourceSignal,
+    job: { ...job, storefrontId, collectionId: null, inputJson: { ...job.inputJson, canonicalRootDomain: hostname }, updatedAt: now }
   });
   const payload: GenerationQueuePayload = {
     jobId: job.id,
     traceId,
-    url: input.url
+    url: canonicalUrl,
+    brandId,
+    storefrontId,
+    collectionId,
+    dropId,
+    slug,
+    dnsClaimNonce,
+    summonerWallet: input.summonerWallet || null,
+    creatorDisplayName: input.creatorDisplayName || null,
+    summonPaymentTxHash: input.summonPaymentTxHash || null,
+    summonPaymentMetadataJson: input.summonPaymentMetadataJson || null
   };
   if (!redisConfigured() && process.env.NODE_ENV !== "production") {
     logger.info("queue.generation.inline_dev", {
@@ -143,7 +292,17 @@ async function runInlineDevelopmentGeneration(input: GenerationQueuePayload) {
     });
     await generateDropFromUrl(input.url, {
       jobId: input.jobId,
-      traceId: input.traceId
+      traceId: input.traceId,
+      brandId: input.brandId,
+      storefrontId: input.storefrontId,
+      collectionId: input.collectionId,
+      dropId: input.dropId,
+      slug: input.slug,
+      dnsClaimNonce: input.dnsClaimNonce,
+      summonerWallet: input.summonerWallet,
+      creatorDisplayName: input.creatorDisplayName,
+      summonPaymentTxHash: input.summonPaymentTxHash,
+      summonPaymentMetadataJson: input.summonPaymentMetadataJson
     });
     logger.info("queue.generation.inline_dev.completed", {
       jobId: input.jobId,

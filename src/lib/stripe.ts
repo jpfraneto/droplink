@@ -1,4 +1,5 @@
 import Stripe from "stripe";
+import { dropConfig } from "./env";
 import { loggedExternalCall } from "./logger";
 import { priceBookRelicPriceCents } from "./pricing";
 import { attachStripeSession, releaseCheckout, reserveEditionForRelic } from "./store";
@@ -12,11 +13,82 @@ export function stripeClient(): Stripe | null {
   });
 }
 
-function appUrl(): string {
+export function appUrl(): string {
   return (process.env.DROPLINK_PUBLIC_BASE_URL || process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000").replace(
     /\/$/,
     ""
   );
+}
+
+export async function createScoutingCheckoutSession(input: {
+  submittedUrl: string;
+  canonicalUrl: string;
+  canonicalRootDomain: string;
+  slug: string;
+  summonerWallet?: string | null;
+  creatorDisplayName?: string | null;
+  baseUrl?: string;
+  requestId?: string | null;
+}): Promise<{ url: string; sessionId: string }> {
+  const stripe = stripeClient();
+  if (!stripe) throw new Error("STRIPE_SECRET_KEY is required for Stripe scouting payments.");
+  const priceCents = Math.round(Number(dropConfig.summonPriceUsdc) * 100);
+  if (!Number.isFinite(priceCents) || priceCents <= 0) {
+    throw new Error("Stripe scouting checkout requires a positive scouting price.");
+  }
+  const baseUrl = (input.baseUrl || appUrl()).replace(/\/$/, "");
+  const successParams = new URLSearchParams({
+    url: input.canonicalUrl,
+    domain: input.canonicalRootDomain,
+    stripe_scout: "success"
+  });
+  const cancelParams = new URLSearchParams({
+    url: input.canonicalUrl,
+    domain: input.canonicalRootDomain,
+    stripe_scout: "cancelled"
+  });
+  const session = await loggedExternalCall(
+    {
+      provider: "stripe",
+      operation: "checkout.sessions.create",
+      requestId: input.requestId,
+      traceId: null,
+      metadata: {
+        type: "droplink_scout",
+        canonicalRootDomain: input.canonicalRootDomain
+      }
+    },
+    () =>
+      stripe.checkout.sessions.create({
+        mode: "payment",
+        success_url: `${baseUrl}/${input.slug}?${successParams.toString()}`,
+        cancel_url: `${baseUrl}/${input.slug}?${cancelParams.toString()}`,
+        line_items: [
+          {
+            quantity: 1,
+            price_data: {
+              currency: "usd",
+              unit_amount: priceCents,
+              product_data: {
+                name: `Scout ${input.canonicalRootDomain} on DropLink`,
+                description: "Create a preview DropLink. Products can only be sold after verified owner claim."
+              }
+            }
+          }
+        ],
+        metadata: {
+          type: "droplink_scout",
+          submittedUrl: input.submittedUrl,
+          canonicalUrl: input.canonicalUrl,
+          canonicalRootDomain: input.canonicalRootDomain,
+          slug: input.slug,
+          summonerWallet: input.summonerWallet || "",
+          creatorDisplayName: input.creatorDisplayName || ""
+        }
+      })
+  );
+  if (!session.url) throw new Error("Stripe did not return a checkout URL.");
+  return { url: session.url, sessionId: session.id };
 }
 
 export async function createRelicCheckoutSession(input: {

@@ -11,7 +11,7 @@ function hasAdminCookie() {
   return adminKeyMatches(cookies().get("droplink_admin")?.value);
 }
 
-export default async function AdminBrandPage({
+export default async function PublicSlugAdminPage({
   params,
   searchParams
 }: {

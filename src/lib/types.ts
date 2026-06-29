@@ -514,6 +514,19 @@ export type Claim = {
   createdAt: string;
 };
 
+export type DropNotification = {
+  id: string;
+  dropId: string;
+  relicId?: string | null;
+  email: string;
+  status: "pending" | "sent" | "failed" | "unsubscribed";
+  source: string;
+  notifiedAt?: string | null;
+  metadataJson?: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type FulfillmentOrder = {
   id: string;
   orderId: string;
@@ -627,6 +640,7 @@ export type StoreData = {
   brandStudies: BrandStudy[];
   relicPlans: RelicPlan[];
   claims: Claim[];
+  dropNotifications: DropNotification[];
   checkoutSessions: CheckoutSession[];
   orders: Order[];
   ledgerEntries: LedgerEntry[];

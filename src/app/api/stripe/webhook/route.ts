@@ -1,13 +1,17 @@
 import { headers } from "next/headers";
 import { NextResponse } from "next/server";
+import { canonicalizeDropUrl } from "@/lib/dropCanonicalization";
 import { createPrintfulDraftOrder, confirmPrintfulOrder } from "@/lib/printful";
+import { enqueueGeneration } from "@/lib/queues";
 import { stripeClient } from "@/lib/stripe";
 import {
   completeCheckoutSale,
   createFulfillmentOrder,
   expireCheckoutByStripeSession,
   getFulfillmentOrderByOrderId,
+  getDropBundleByCanonicalHash,
   recordEvent,
+  recordDropSourceSignal,
   updateOrderFulfillmentFields,
   updateStripeConnectPayoutStatus
 } from "@/lib/store";
@@ -30,6 +34,60 @@ export async function POST(request: Request) {
       const session = event.data.object;
       if (session.payment_status !== "paid") {
         return NextResponse.json({ received: true, skipped: "checkout session is not paid" });
+      }
+      if (session.metadata?.type === "droplink_scout") {
+        const submittedUrl = session.metadata.canonicalUrl || session.metadata.submittedUrl;
+        if (!submittedUrl) throw new Error("Stripe scouting session is missing canonicalUrl metadata.");
+        const target = canonicalizeDropUrl(submittedUrl);
+        const existing = await getDropBundleByCanonicalHash(target.rootDomainHash);
+        if (existing?.drop) {
+          await recordDropSourceSignal({
+            dropId: existing.drop.id,
+            submittedUrl: session.metadata.submittedUrl || target.originalSubmittedUrl,
+            submittedHost: target.submittedHost,
+            submittedPath: target.submittedPath,
+            normalizedUrl: target.sourceUrl,
+            submittedByWallet: session.metadata.summonerWallet || session.customer_details?.email || null,
+            usedForGeneration: false,
+            signalMetadataJson: { duplicateRootDomain: true, provider: "stripe", sessionId: session.id }
+          });
+          await recordEvent({
+            entityType: "drop",
+            entityId: existing.drop.id,
+            eventType: "duplicate_scout_detected",
+            level: "info",
+            message: "Stripe scouting payment completed after the DropLink already existed.",
+            metadataJson: { checkoutSessionId: session.id, canonicalRootDomain: target.canonicalRootDomain },
+            requestId: request.headers.get("x-request-id"),
+            traceId: existing.storefront.generationTraceId || null
+          });
+          return NextResponse.json({ received: true, skipped: "drop already exists" });
+        }
+        const job = await enqueueGeneration({
+          url: target.canonicalUrl,
+          summonerWallet: session.metadata.summonerWallet || session.customer_details?.email || `stripe:${session.id}`,
+          creatorDisplayName: session.metadata.creatorDisplayName || session.customer_details?.email || null,
+          summonPaymentTxHash: typeof session.payment_intent === "string" ? session.payment_intent : session.id,
+          summonPaymentMetadataJson: {
+            provider: "stripe",
+            sessionId: session.id,
+            paymentIntent: typeof session.payment_intent === "string" ? session.payment_intent : null,
+            amountTotal: session.amount_total,
+            currency: session.currency
+          },
+          requestId: request.headers.get("x-request-id")
+        });
+        await recordEvent({
+          entityType: "generation_job",
+          entityId: job.id,
+          eventType: "drop_scouted",
+          level: "info",
+          message: "Stripe scouting payment completed; generation queued.",
+          metadataJson: { checkoutSessionId: session.id, canonicalUrl: target.canonicalUrl },
+          requestId: request.headers.get("x-request-id"),
+          traceId: job.traceId
+        });
+        return NextResponse.json({ received: true, jobId: job.id });
       }
       const sale = await completeCheckoutSale({
         stripeSessionId: session.id,

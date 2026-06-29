@@ -19,7 +19,7 @@ export async function POST(request: Request, { params }: { params: { id: string 
       requestId: request.headers.get("x-request-id"),
       traceId: bundle.storefront.generationTraceId || null
     });
-    return redirectTo(request, `/admin?storefront=${bundle.storefront.id}`);
+    return redirectTo(request, `/admin/${bundle.storefront.slug}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Publish failed.";
     return redirectTo(request, `/admin?error=${encodeURIComponent(message)}`);

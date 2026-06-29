@@ -2,16 +2,35 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { canonicalizeDropUrl } from "@/lib/dropCanonicalization";
 import { assertFiniteDropConfig } from "@/lib/env";
-import { generateDropFromUrl } from "@/lib/generateDrop";
+import { dropConfig } from "@/lib/env";
+import { enqueueGeneration } from "@/lib/queues";
 import { rateLimit, requestIp } from "@/lib/rateLimit";
 import { getDropBundleByCanonicalHash, recordDropSourceSignal, recordEvent } from "@/lib/store";
-import { verifyX402Payment } from "@/lib/x402";
+import { verifyX402Payment, type VerifiedX402Payment } from "@/lib/x402";
 
 const schema = z.object({
   submittedUrl: z.string().min(3),
   summonerWallet: z.string().optional(),
   creatorDisplayName: z.string().optional()
 });
+
+function zeroDollarScoutPayment(request: Request, body: z.infer<typeof schema>): VerifiedX402Payment {
+  const ip = requestIp(request).replace(/[^a-zA-Z0-9]/g, "").slice(0, 10) || "local";
+  const payerAddress = body.summonerWallet || request.headers.get("x-scout-wallet") || `test_scout_${ip}`;
+  return {
+    txHash: `free_scout_${Date.now().toString(36)}`,
+    payerAddress,
+    recipientAddress: "test-free-summon",
+    network: "test",
+    asset: "USDC",
+    amountUsdc: "0",
+    raw: {
+      valid: true,
+      testMode: true,
+      reason: "DROPLINK_SUMMON_PRICE_USDC is 0"
+    }
+  };
+}
 
 export async function POST(request: Request) {
   if (!rateLimit(`summon:${requestIp(request)}`, 8, 60_000)) {
@@ -36,7 +55,7 @@ export async function POST(request: Request) {
       await recordEvent({
         entityType: "drop",
         entityId: existing.drop.id,
-        eventType: "duplicate_summon_detected",
+        eventType: "duplicate_scout_detected",
         level: "info",
         message: "Existing DropLink returned without charging again.",
         metadataJson: { canonicalRootDomain: target.canonicalRootDomain, submittedUrl: target.sourceUrl, status: existing.drop.status },
@@ -45,33 +64,42 @@ export async function POST(request: Request) {
       });
       return NextResponse.json({
         existing: true,
-        message: `${target.canonicalRootDomain} has already been summoned. Returning the existing DropLink without charging again.`,
+        message: `${target.canonicalRootDomain} has already been scouted. Returning the existing DropLink without charging again.`,
         drop: existing.drop,
         storefront: existing.storefront,
         slug: existing.storefront.slug
       });
     }
-    const payment = await verifyX402Payment(request);
-    const bundle = await generateDropFromUrl(target.canonicalUrl, {
+    const payment = Number(dropConfig.summonPriceUsdc) <= 0
+      ? zeroDollarScoutPayment(request, body)
+      : await verifyX402Payment(request);
+    const job = await enqueueGeneration({
+      url: target.canonicalUrl,
       summonerWallet: payment.payerAddress || body.summonerWallet || null,
       creatorDisplayName: body.creatorDisplayName || null,
       summonPaymentTxHash: payment.txHash,
       summonPaymentMetadataJson: payment.raw,
-      traceId: request.headers.get("x-request-id") || undefined
+      requestId: request.headers.get("x-request-id")
     });
     await recordEvent({
-      entityType: "drop",
-      entityId: bundle.drop?.id || bundle.storefront.id,
-      eventType: "drop_summoned",
+      entityType: "generation_job",
+      entityId: job.id,
+      eventType: "drop_scouted",
       level: "info",
-      message: "Paid x402 summon verified; finite DropLink generated.",
+      message: "Scout payment approved; generation queued.",
       metadataJson: { canonicalUrl: target.canonicalUrl, txHash: payment.txHash },
       requestId: request.headers.get("x-request-id"),
-      traceId: bundle.storefront.generationTraceId || null
+      traceId: job.traceId
     });
-    return NextResponse.json({ existing: false, drop: bundle.drop, storefront: bundle.storefront, slug: bundle.storefront.slug }, { status: 201 });
+    return NextResponse.json({
+      existing: false,
+      jobId: job.id,
+      traceId: job.traceId,
+      slug: typeof job.inputJson.slug === "string" ? job.inputJson.slug : undefined,
+      storefrontId: job.storefrontId
+    }, { status: 201 });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not summon DropLink.";
+    const message = error instanceof Error ? error.message : "Could not scout DropLink.";
     const status = message.includes("x402") || message.includes("payment") ? 402 : 400;
     return NextResponse.json({ error: message }, { status });
   }

@@ -7,6 +7,7 @@ import { dropConfig, x402Readiness, tempoReadiness } from "./env";
 import { calculateWaterfall } from "./economics";
 import { newId } from "./hashes";
 import { priceBookProfitBlockers, priceBookRelicPriceCents } from "./pricing";
+import { revenueSplitForDrop, SCOUT_BPS } from "./protocol";
 import type {
   AdminReview,
   Asset,
@@ -17,6 +18,7 @@ import type {
   Claim,
   Collection,
   Drop,
+  DropNotification,
   DropSourceSignal,
   FulfillmentOrder,
   GenerationJob,
@@ -54,6 +56,7 @@ export const emptyStore: StoreData = {
   brandStudies: [],
   relicPlans: [],
   claims: [],
+  dropNotifications: [],
   checkoutSessions: [],
   orders: [],
   ledgerEntries: [],
@@ -87,6 +90,7 @@ function normalizeStore(input: Partial<StoreData>): StoreData {
     brandStudies: input.brandStudies || [],
     relicPlans: input.relicPlans || [],
     claims: input.claims || [],
+    dropNotifications: input.dropNotifications || [],
     checkoutSessions: input.checkoutSessions || [],
     orders: input.orders || [],
     ledgerEntries: input.ledgerEntries || [],
@@ -434,6 +438,51 @@ export async function getStorefrontBundleById(id: string): Promise<StorefrontBun
   };
 }
 
+export async function saveScoutShell(input: {
+  brand: Brand;
+  storefront: Storefront;
+  drop: Drop;
+  sourceSignal: DropSourceSignal;
+  job: GenerationJob;
+}): Promise<StorefrontBundle> {
+  if (!usePostgres()) {
+    return mutateStore((data) => {
+      data.brands.push(input.brand);
+      data.storefronts.push(input.storefront);
+      data.drops.push(input.drop);
+      data.dropSourceSignals.push(input.sourceSignal);
+      const existingJob = data.generationJobs.find((entry) => entry.id === input.job.id);
+      if (existingJob) Object.assign(existingJob, input.job);
+      else data.generationJobs.push(input.job);
+      const hydrated = hydrateBundle(data, input.storefront);
+      if (!hydrated) throw new Error("Scout storefront could not be hydrated.");
+      return hydrated;
+    });
+  }
+
+  const db = sql();
+  await db.begin(async (tx) => {
+    await tx`insert into brands ${tx(toSnake(input.brand))}`;
+    await tx`insert into storefronts ${tx(toSnake(input.storefront))}`;
+    await tx`insert into drops ${tx(toSnake(input.drop))}`;
+    await tx`insert into drop_source_signals ${tx(toSnake(input.sourceSignal))}`;
+    await tx`
+      insert into generation_jobs ${tx(toSnake(input.job))}
+      on conflict (id) do update
+      set storefront_id = excluded.storefront_id,
+          collection_id = excluded.collection_id,
+          status = excluded.status,
+          current_step = excluded.current_step,
+          input_json = excluded.input_json,
+          error = excluded.error,
+          updated_at = excluded.updated_at
+    `;
+  });
+  const hydrated = await getStorefrontBundleById(input.storefront.id);
+  if (!hydrated) throw new Error("Scout storefront could not be loaded after save.");
+  return hydrated;
+}
+
 function toCamel(input: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input)) {
@@ -462,10 +511,17 @@ export async function saveGeneratedBundle(bundle: {
 }): Promise<StorefrontBundle> {
   if (!usePostgres()) {
     return mutateStore((data) => {
-      if (bundle.drop) data.drops.push(bundle.drop);
-      if (bundle.sourceSignals) data.dropSourceSignals.push(...bundle.sourceSignals);
-      data.brands.push(bundle.brand);
-      data.storefronts.push(bundle.storefront);
+      const replace = <T extends { id: string }>(rows: T[], entry: T) => {
+        const index = rows.findIndex((row) => row.id === entry.id);
+        if (index >= 0) rows[index] = entry;
+        else rows.push(entry);
+      };
+      if (bundle.drop) replace(data.drops, bundle.drop);
+      if (bundle.sourceSignals) {
+        for (const signal of bundle.sourceSignals) replace(data.dropSourceSignals, signal);
+      }
+      replace(data.brands, bundle.brand);
+      replace(data.storefronts, bundle.storefront);
       data.brandSnapshots.push(bundle.snapshot);
       data.brandStudies.push(bundle.study);
       data.collections.push(bundle.collection);
@@ -488,10 +544,82 @@ export async function saveGeneratedBundle(bundle: {
 
   const db = sql();
   await db.begin(async (tx) => {
-    await tx`insert into brands ${tx(toSnake(bundle.brand))}`;
-    await tx`insert into storefronts ${tx(toSnake(bundle.storefront))}`;
-    if (bundle.drop) await tx`insert into drops ${tx(toSnake(bundle.drop))}`;
-    for (const signal of bundle.sourceSignals || []) await tx`insert into drop_source_signals ${tx(toSnake(signal))}`;
+    await tx`
+      insert into brands ${tx(toSnake(bundle.brand))}
+      on conflict (id) do update
+      set canonical_url = excluded.canonical_url,
+          hostname = excluded.hostname,
+          slug = excluded.slug,
+          name = excluded.name,
+          updated_at = excluded.updated_at
+    `;
+    await tx`
+      insert into storefronts ${tx(toSnake(bundle.storefront))}
+      on conflict (id) do update
+      set brand_id = excluded.brand_id,
+          slug = excluded.slug,
+          status = excluded.status,
+          claim_status = excluded.claim_status,
+          commerce_mode = excluded.commerce_mode,
+          commission_bps = excluded.commission_bps,
+          custom_domain = excluded.custom_domain,
+          stripe_connected_account_id = excluded.stripe_connected_account_id,
+          generation_status = excluded.generation_status,
+          generation_trace_id = excluded.generation_trace_id,
+          updated_at = excluded.updated_at,
+          published_at = excluded.published_at
+    `;
+    if (bundle.drop) {
+      await tx`
+        insert into drops ${tx(toSnake(bundle.drop))}
+        on conflict (id) do update
+        set storefront_id = excluded.storefront_id,
+            original_submitted_url = excluded.original_submitted_url,
+            submitted_host = excluded.submitted_host,
+            submitted_path = excluded.submitted_path,
+            source_url = excluded.source_url,
+            canonical_url = excluded.canonical_url,
+            canonical_domain = excluded.canonical_domain,
+            canonical_root_domain = excluded.canonical_root_domain,
+            registrable_domain = excluded.registrable_domain,
+            root_domain_hash = excluded.root_domain_hash,
+            domain_hash = excluded.domain_hash,
+            status = excluded.status,
+            domain_claim_status = case when drops.domain_claim_status = 'verified' then drops.domain_claim_status else excluded.domain_claim_status end,
+            payout_status = excluded.payout_status,
+            payout_method = excluded.payout_method,
+            publish_status = excluded.publish_status,
+            summoner_wallet = excluded.summoner_wallet,
+            creator_display_name = excluded.creator_display_name,
+            summon_payment_tx_hash = excluded.summon_payment_tx_hash,
+            summon_payment_metadata_json = excluded.summon_payment_metadata_json,
+            summon_price_usdc = excluded.summon_price_usdc,
+            creator_bounty_bps = excluded.creator_bounty_bps,
+            protocol_fee_bps = excluded.protocol_fee_bps,
+            total_supply = excluded.total_supply,
+            relics_per_drop = excluded.relics_per_drop,
+            editions_per_relic = excluded.editions_per_relic,
+            dns_claim_nonce = coalesce(drops.dns_claim_nonce, excluded.dns_claim_nonce),
+            dns_record_name = coalesce(drops.dns_record_name, excluded.dns_record_name),
+            dns_record_value = coalesce(drops.dns_record_value, excluded.dns_record_value),
+            domain_owner_name = coalesce(drops.domain_owner_name, excluded.domain_owner_name),
+            domain_owner_wallet = coalesce(drops.domain_owner_wallet, excluded.domain_owner_wallet),
+            domain_owner_email = coalesce(drops.domain_owner_email, excluded.domain_owner_email),
+            domain_claim_proof_json = coalesce(drops.domain_claim_proof_json, excluded.domain_claim_proof_json),
+            domain_claimed_at = coalesce(drops.domain_claimed_at, excluded.domain_claimed_at),
+            price_book_json = excluded.price_book_json,
+            projected_economics_json = excluded.projected_economics_json,
+            price_book_locked_at = excluded.price_book_locked_at,
+            readiness_json = excluded.readiness_json,
+            updated_at = excluded.updated_at
+      `;
+    }
+    for (const signal of bundle.sourceSignals || []) {
+      await tx`
+        insert into drop_source_signals ${tx(toSnake(signal))}
+        on conflict (id) do nothing
+      `;
+    }
     await tx`insert into brand_snapshots ${tx(toSnake(bundle.snapshot))}`;
     await tx`insert into brand_studies ${tx(toSnake(bundle.study))}`;
     await tx`insert into collections ${tx(toSnake({ ...bundle.collection, ogImageId: bundle.ogImage.id }))}`;
@@ -528,6 +656,42 @@ function toSnake(input: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+function appBaseUrl() {
+  return (process.env.DROPLINK_PUBLIC_BASE_URL || process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000").replace(/\/$/, "");
+}
+
+function emailHash(email: string) {
+  return createHash("sha256").update(email.trim().toLowerCase()).digest("hex");
+}
+
+async function sendLaunchEmail(input: { to: string; domain: string; url: string; productName?: string | null }) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.DROPLINK_FROM_EMAIL;
+  if (!apiKey || !from) {
+    return { sent: false, reason: "RESEND_API_KEY and DROPLINK_FROM_EMAIL are required." };
+  }
+  const subject = `${input.domain} is live on DropLink`;
+  const productLine = input.productName ? `<p>The item you asked about, <strong>${input.productName}</strong>, is now available.</p>` : "";
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      from,
+      to: input.to,
+      subject,
+      html: `<p>${input.domain} has claimed and activated its DropLink.</p>${productLine}<p><a href="${input.url}">Open the drop</a></p>`
+    })
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`Resend rejected launch notification: ${body || response.statusText}`);
+  }
+  return { sent: true, reason: null };
+}
+
 export async function recordEvent(input: Omit<SystemEvent, "id" | "createdAt">): Promise<SystemEvent> {
   const event: SystemEvent = { id: newId("evt"), createdAt: nowIso(), ...input };
   if (!usePostgres()) {
@@ -538,6 +702,117 @@ export async function recordEvent(input: Omit<SystemEvent, "id" | "createdAt">):
   }
   await sql()`insert into system_events ${sql()(toSnake(event))}`;
   return event;
+}
+
+export async function createDropNotification(input: {
+  dropId: string;
+  relicId?: string | null;
+  email: string;
+  source?: string;
+  metadataJson?: Record<string, unknown> | null;
+}): Promise<DropNotification> {
+  const cleanEmail = input.email.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new Error("Enter a valid email address.");
+  const now = nowIso();
+  const notification: DropNotification = {
+    id: newId("not"),
+    dropId: input.dropId,
+    relicId: input.relicId || null,
+    email: cleanEmail,
+    status: "pending",
+    source: input.source || "preview_buy_modal",
+    notifiedAt: null,
+    metadataJson: {
+      ...(input.metadataJson || {}),
+      emailHash: emailHash(cleanEmail)
+    },
+    createdAt: now,
+    updatedAt: now
+  };
+  if (!usePostgres()) {
+    await mutateStore((data) => {
+      const existing = data.dropNotifications.find(
+        (entry) => entry.dropId === notification.dropId && (entry.relicId || null) === (notification.relicId || null) && entry.email.toLowerCase() === cleanEmail
+      );
+      if (existing) {
+        existing.status = existing.status === "unsubscribed" ? "unsubscribed" : "pending";
+        existing.updatedAt = nowIso();
+        return;
+      }
+      data.dropNotifications.push(notification);
+    });
+    return notification;
+  }
+  const [rowValue] = await sql()`
+    insert into drop_notifications ${sql()(toSnake(notification))}
+    on conflict (drop_id, relic_id, email) do update
+    set status = case when drop_notifications.status = 'unsubscribed' then 'unsubscribed' else 'pending' end,
+        updated_at = now(),
+        metadata_json = excluded.metadata_json
+    returning *
+  `;
+  return row<DropNotification>(toCamel(rowValue));
+}
+
+export async function sendDropLiveNotifications(dropId: string): Promise<{ attempted: number; sent: number; skipped: number }> {
+  const bundle = await getDropBundleByDropId(dropId);
+  if (!bundle?.drop) throw new Error("Drop not found.");
+  const domain = bundle.drop.canonicalRootDomain || bundle.drop.canonicalDomain || bundle.brand.hostname;
+  const url = `${appBaseUrl()}/${bundle.storefront.slug}`;
+  if (!usePostgres()) {
+    const data = await readStore();
+    const pending = data.dropNotifications.filter((entry) => entry.dropId === dropId && entry.status === "pending");
+    return { attempted: pending.length, sent: 0, skipped: pending.length };
+  }
+  const rows = await sql()`
+    select n.*, r.name as relic_name
+    from drop_notifications n
+    left join relics r on r.id = n.relic_id
+    where n.drop_id = ${dropId} and n.status = 'pending'
+    order by n.created_at asc
+  `;
+  let sent = 0;
+  let skipped = 0;
+  for (const entry of rows) {
+    try {
+      const result = await sendLaunchEmail({
+        to: String(entry.email),
+        domain,
+        url,
+        productName: typeof entry.relic_name === "string" ? entry.relic_name : null
+      });
+      if (result.sent) {
+        sent += 1;
+        await sql()`update drop_notifications set status = 'sent', notified_at = now(), updated_at = now() where id = ${entry.id}`;
+      } else {
+        skipped += 1;
+        await recordEvent({
+          entityType: "drop",
+          entityId: dropId,
+          eventType: "launch_notification_skipped",
+          level: "warn",
+          message: result.reason || "Launch email provider is not configured.",
+          metadataJson: { notificationId: entry.id },
+          requestId: null,
+          traceId: bundle.storefront.generationTraceId || null
+        });
+      }
+    } catch (error) {
+      skipped += 1;
+      await sql()`update drop_notifications set status = 'failed', updated_at = now() where id = ${entry.id}`;
+      await recordEvent({
+        entityType: "drop",
+        entityId: dropId,
+        eventType: "launch_notification_failed",
+        level: "error",
+        message: error instanceof Error ? error.message : "Launch notification failed.",
+        metadataJson: { notificationId: entry.id },
+        requestId: null,
+        traceId: bundle.storefront.generationTraceId || null
+      });
+    }
+  }
+  return { attempted: rows.length, sent, skipped };
 }
 
 export async function updateGenerationStep(storefrontId: string, step: GenerationStep, error?: string): Promise<void> {
@@ -592,6 +867,7 @@ export async function publishStorefront(storefrontId: string): Promise<Storefron
       if (!drop) throw new Error("Drop metadata is missing.");
       drop.status = "published";
       drop.publishStatus = "published";
+      drop.creatorBountyBps = revenueSplitForDrop(drop).scoutBps;
       drop.publishedAt = nowIso();
       drop.readinessJson = readiness;
       drop.priceBookJson = lockedPriceBook;
@@ -623,6 +899,11 @@ export async function publishStorefront(storefrontId: string): Promise<Storefron
       update drops
       set status = 'published',
           publish_status = 'published',
+          creator_bounty_bps = case
+            when nullif(summoner_wallet, '') is null then 0
+            when lower(coalesce(summoner_wallet, '')) = lower(coalesce(domain_owner_wallet, '')) then 0
+            else ${SCOUT_BPS}
+          end,
           published_at = now(),
           readiness_json = ${JSON.stringify(readiness)}::jsonb,
           price_book_json = ${JSON.stringify(lockedPriceBook)}::jsonb,
@@ -645,6 +926,20 @@ export async function publishStorefront(storefrontId: string): Promise<Storefron
   });
   const published = await getStorefrontBundleById(storefrontId);
   if (!published) throw new Error("Published storefront could not be loaded.");
+  if (published.drop?.id) {
+    await sendDropLiveNotifications(published.drop.id).catch((error) =>
+      recordEvent({
+        entityType: "drop",
+        entityId: published.drop?.id || storefrontId,
+        eventType: "launch_notifications_failed",
+        level: "error",
+        message: error instanceof Error ? error.message : "Launch notifications failed.",
+        metadataJson: {},
+        requestId: null,
+        traceId: published.storefront.generationTraceId || null
+      })
+    );
+  }
   return published;
 }
 
@@ -779,7 +1074,18 @@ export async function reserveEditionForRelic(input: {
       const collection = data.collections.find((entry) => entry.id === relic.collectionId);
       const storefront = collection ? data.storefronts.find((entry) => entry.id === collection.storefrontId) : null;
       const drop = storefront ? data.drops.find((entry) => entry.storefrontId === storefront.id) : null;
-      if (!collection || !storefront || !drop || drop.status !== "published" || storefront.status !== "published" || collection.status !== "published" || relic.status !== "live") {
+      if (
+        !collection ||
+        !storefront ||
+        !drop ||
+        drop.status !== "published" ||
+        drop.domainClaimStatus !== "verified" ||
+        drop.publishStatus !== "published" ||
+        storefront.status !== "published" ||
+        storefront.commerceMode !== "platform_checkout" ||
+        collection.status !== "published" ||
+        relic.status !== "live"
+      ) {
         throw new Error("Relic is not available for checkout.");
       }
       if (!drop.priceBookJson || drop.priceBookJson.status !== "locked" || !drop.priceBookLockedAt) throw new Error("Drop price book is not locked.");
@@ -835,7 +1141,16 @@ export async function reserveEditionForRelic(input: {
     const [collection] = await tx`select * from collections where id = ${relic.collection_id}`;
     const [storefront] = await tx`select * from storefronts where id = ${collection.storefront_id}`;
     const [drop] = await tx`select * from drops where storefront_id = ${storefront.id}`;
-    if (!drop || drop.status !== "published" || storefront.status !== "published" || collection.status !== "published" || relic.status !== "live") {
+    if (
+      !drop ||
+      drop.status !== "published" ||
+      drop.domain_claim_status !== "verified" ||
+      drop.publish_status !== "published" ||
+      storefront.status !== "published" ||
+      storefront.commerce_mode !== "platform_checkout" ||
+      collection.status !== "published" ||
+      relic.status !== "live"
+    ) {
       throw new Error("Relic is not available for checkout.");
     }
     const priceBook = drop.price_book_json as unknown as Drop["priceBookJson"];
@@ -1033,13 +1348,14 @@ export async function completeCheckoutSale(input: {
       const drop = storefront ? data.drops.find((entry) => entry.storefrontId === storefront.id) : null;
       if (!edition || !relic || !storefront || !drop || edition.status !== "reserved") throw new Error("Edition is not reserved.");
       const locked = lockedPriceEconomics(drop, relic);
+      const split = revenueSplitForDrop(drop);
       const waterfall = calculateWaterfall({
         grossAmount: locked.grossAmount,
         currency: relic.currency,
         stripeFeeAmount: locked.stripeFeeAmount,
         printfulCostAmount: locked.printfulCostAmount,
         refundReserveAmount: locked.refundReserveAmount,
-        creatorBountyBps: drop.creatorBountyBps,
+        creatorBountyBps: split.scoutBps,
         protocolFeeBps: drop.protocolFeeBps
       });
       const order: Order = {
@@ -1094,7 +1410,7 @@ export async function completeCheckoutSale(input: {
                 amount: waterfall.creatorBountyAmount,
                 currency: relic.currency,
                 status: "pending" as const,
-                reason: "creator bounty from net drop margin",
+                reason: split.ownerReceivesAll ? "self-claimed drop; no scout bounty" : "scout bounty from net drop margin",
                 txHash: null,
                 createdAt: nowIso(),
                 updatedAt: nowIso()
@@ -1172,13 +1488,14 @@ export async function completeCheckoutSale(input: {
     const typedDrop = row<Drop>(toCamel(drop));
     const typedRelic = row<Relic>(toCamel(relic));
     const locked = lockedPriceEconomics(typedDrop, typedRelic);
+    const split = revenueSplitForDrop(typedDrop);
     const waterfall = calculateWaterfall({
       grossAmount: locked.grossAmount,
       currency: String(relic.currency),
       stripeFeeAmount: locked.stripeFeeAmount,
       printfulCostAmount: locked.printfulCostAmount,
       refundReserveAmount: locked.refundReserveAmount,
-      creatorBountyBps: Number(drop.creator_bounty_bps),
+      creatorBountyBps: split.scoutBps,
       protocolFeeBps: Number(drop.protocol_fee_bps)
     });
     const order: Order = {
@@ -1233,7 +1550,7 @@ export async function completeCheckoutSale(input: {
           amount: waterfall.creatorBountyAmount,
           currency: String(relic.currency),
           status: "pending" as const,
-          reason: "creator bounty from net drop margin",
+          reason: split.ownerReceivesAll ? "self-claimed drop; no scout bounty" : "scout bounty from net drop margin",
           txHash: null,
           createdAt: nowIso(),
           updatedAt: nowIso()
@@ -1779,6 +2096,7 @@ export async function startDnsClaim(storefrontId: string, input: { claimantWalle
         drop.dnsClaimNonce = token;
         drop.dnsRecordName = txtName;
         drop.dnsRecordValue = txtValue;
+        drop.domainOwnerWallet = input.claimantWallet || drop.domainOwnerWallet || null;
         drop.domainOwnerEmail = input.claimantEmail || drop.domainOwnerEmail || null;
         drop.domainOwnerName = input.claimantName || drop.domainOwnerName || null;
         drop.updatedAt = nowIso();
@@ -1794,6 +2112,7 @@ export async function startDnsClaim(storefrontId: string, input: { claimantWalle
       set dns_claim_nonce = ${token},
           dns_record_name = ${txtName},
           dns_record_value = ${txtValue},
+          domain_owner_wallet = coalesce(${input.claimantWallet || null}, domain_owner_wallet),
           domain_owner_email = ${input.claimantEmail || null},
           domain_owner_name = ${input.claimantName || null},
           updated_at = now()
@@ -1879,6 +2198,7 @@ export async function verifyDropClaim(dropId: string): Promise<Claim> {
         drop.publishStatus = "blocked";
         drop.domainOwnerEmail = claim.claimantEmail || null;
         drop.domainOwnerName = claim.claimantName || null;
+        drop.domainOwnerWallet = claim.claimantWallet || drop.domainOwnerWallet || null;
         drop.domainClaimProofJson = { records: proof.records };
         drop.domainClaimedAt = nowIso();
         drop.updatedAt = nowIso();
@@ -1892,6 +2212,7 @@ export async function verifyDropClaim(dropId: string): Promise<Claim> {
   } else {
     const claimantEmail = claim.claimantEmail || null;
     const claimantName = claim.claimantName || null;
+    const claimantWallet = claim.claimantWallet || null;
     await sql().begin(async (tx) => {
       await tx`
         update claims
@@ -1905,6 +2226,7 @@ export async function verifyDropClaim(dropId: string): Promise<Claim> {
             publish_status = 'blocked',
             domain_owner_email = ${claimantEmail},
             domain_owner_name = ${claimantName},
+            domain_owner_wallet = coalesce(${claimantWallet}, domain_owner_wallet),
             domain_claim_proof_json = ${JSON.stringify({ records: proof.records })}::jsonb,
             domain_claimed_at = now(),
             updated_at = now()
@@ -1953,6 +2275,7 @@ export async function startTempoPayout(dropId: string, input: { walletAddress: s
       drop.payoutDnsRecordName = txtName;
       drop.payoutDnsRecordValue = txtValue;
       drop.tempoWalletAddress = input.walletAddress;
+      drop.domainOwnerWallet = drop.domainOwnerWallet || input.walletAddress;
       drop.payoutMethod = "tempo_wallet";
       drop.payoutStatus = "missing";
       drop.updatedAt = nowIso();
@@ -1964,6 +2287,7 @@ export async function startTempoPayout(dropId: string, input: { walletAddress: s
           payout_dns_record_name = ${txtName},
           payout_dns_record_value = ${txtValue},
           tempo_wallet_address = ${input.walletAddress},
+          domain_owner_wallet = coalesce(domain_owner_wallet, ${input.walletAddress}),
           payout_method = 'tempo_wallet',
           payout_status = 'missing',
           updated_at = now()

@@ -333,6 +333,18 @@ export const claims = pgTable("claims", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });
 
+export const dropNotifications = pgTable("drop_notifications", {
+  id: varchar("id", { length: 64 }).primaryKey(),
+  dropId: varchar("drop_id", { length: 64 }).notNull().references(() => drops.id, { onDelete: "cascade" }),
+  relicId: varchar("relic_id", { length: 64 }).references(() => relics.id, { onDelete: "set null" }),
+  email: text("email").notNull(),
+  status: varchar("status", { length: 32 }).notNull().default("pending"),
+  source: varchar("source", { length: 32 }).notNull().default("preview_buy_modal"),
+  notifiedAt: timestamp("notified_at", { withTimezone: true }),
+  metadataJson: jsonb("metadata_json"),
+  ...timestamps
+});
+
 export const fulfillmentOrders = pgTable("fulfillment_orders", {
   id: varchar("id", { length: 64 }).primaryKey(),
   orderId: varchar("order_id", { length: 64 }).notNull().references(() => orders.id, { onDelete: "cascade" }),

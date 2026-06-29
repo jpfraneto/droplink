@@ -1,13 +1,13 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
+import { adminKeyMatches } from "@/lib/adminAuth";
 import { listStorefrontBundles } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 function hasAdminCookie() {
   if (process.env.DROPLINK_REQUIRE_GENERATION_KEY !== "true") return true;
-  const expected = process.env.DROPLINK_API_KEY;
-  return Boolean(expected && cookies().get("droplink_admin")?.value === expected);
+  return adminKeyMatches(cookies().get("droplink_admin")?.value);
 }
 
 export default async function AdminPage({ searchParams }: { searchParams: { error?: string; auth?: string } }) {
@@ -25,7 +25,7 @@ export default async function AdminPage({ searchParams }: { searchParams: { erro
               enter
             </button>
           </form>
-          {searchParams.auth ? <p className="error">Invalid admin key.</p> : null}
+          {searchParams.auth ? <p className="error">{searchParams.auth === "rate_limited" ? "Too many attempts. Wait a minute and try again." : "Invalid admin key."}</p> : null}
         </div>
       </main>
     );

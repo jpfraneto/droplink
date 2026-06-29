@@ -1,64 +1,160 @@
 import type { Metadata } from "next";
-import type { CSSProperties } from "react";
-import Link from "next/link";
 import { notFound } from "next/navigation";
-import { DropProductCard } from "@/components/DropProductCard";
-import { ThemeLink } from "@/components/ThemeLink";
+import { DroplinkExperience, type DroplinkState, type DroplinkViewModel } from "@/components/DroplinkExperience";
+import { canonicalizeDropUrl } from "@/lib/dropCanonicalization";
 import { formatMoney } from "@/lib/productCatalog";
+import { displayScout, OWNER_BPS_WITH_SCOUT, publicDropLinkStatus, revenueSplitForDrop, SCOUT_BPS } from "@/lib/protocol";
 import { publicProductCopy } from "@/lib/publicCopy";
-import { themeFromBrand } from "@/lib/brandTheme";
-import { getStorefrontBundleBySlug } from "@/lib/store";
+import { getGenerationJobByTraceId, getStorefrontBundleBySlug } from "@/lib/store";
 import type { StorefrontBundle } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
-const githubUrl = "https://github.com/jpfraneto/droplink";
-
-function isRecord(input: unknown): input is Record<string, unknown> {
-  return Boolean(input && typeof input === "object" && !Array.isArray(input));
-}
-
-function recordString(input: Record<string, unknown> | undefined, keys: string[]): string | null {
-  if (!input) return null;
-  for (const key of keys) {
-    const value = input[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return null;
-}
-
-function printfulLink(relic: StorefrontBundle["relics"][number]): string {
-  const spec = relic.fulfillmentSpecJson;
-  const snapshot = isRecord(spec?.rawPrintfulCatalogSnapshotJson) ? spec.rawPrintfulCatalogSnapshotJson : undefined;
-  const product = isRecord(snapshot?.product) ? snapshot.product : undefined;
-  const directUrl = recordString(product, ["url", "product_url", "permalink", "canonical_url", "web_url"]);
-  if (directUrl?.startsWith("http")) return directUrl;
-  const productId = spec?.catalogProductId || relic.printfulProductId;
-  return productId
-    ? `https://www.printful.com/dashboard/custom-products/catalog/product/${productId}`
-    : "https://www.printful.com/dashboard/custom-products";
-}
-
-function cssImageUrl(input: string): string {
-  return `url("${input.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}")`;
-}
 
 function brandDescription(bundle: StorefrontBundle): string {
   const study = bundle.brandStudy?.studyJson;
+  const description = bundle.activeCollection?.subtitle || study?.essence || study?.what_they_bring_to_the_world || study?.worldview || bundle.brand.hostname;
+  return oneLine(publicProductCopy(description));
+}
+
+function brandTitle(bundle: StorefrontBundle): string {
+  return oneLine(publicProductCopy(bundle.activeCollection?.title || bundle.brandStudy?.studyJson.drop_narrative_seed || bundle.brand.name));
+}
+
+function oneLine(input: string, max = 150) {
+  const text = input.replace(/\s+/g, " ").trim();
+  if (text.length <= max) return text;
+  const clipped = text.slice(0, max);
+  return (clipped.includes(" ") ? clipped.slice(0, clipped.lastIndexOf(" ")) : clipped).replace(/[,.:-]$/, "");
+}
+
+function brandLogoUrl(bundle: StorefrontBundle): string | null {
+  const metadata = bundle.assets.find((asset) => asset.metadataJson?.sourceFavicon || asset.metadataJson?.sourceOgImage)?.metadataJson;
+  const favicon = metadata?.sourceFavicon;
+  const og = metadata?.sourceOgImage;
+  return typeof favicon === "string" && favicon ? favicon : typeof og === "string" && og ? og : null;
+}
+
+function productImage(bundle: StorefrontBundle, relicId: string): string {
   return (
-    study?.what_they_bring_to_the_world ||
-    study?.essence ||
-    study?.worldview ||
-    publicProductCopy(bundle.activeCollection?.subtitle || `A finite merch drop for ${bundle.brand.hostname}.`)
+    bundle.mockups.find((entry) => entry.relicId === relicId)?.imageUrl ||
+    bundle.assets.find((entry) => entry.relicId === relicId && entry.type === "preview")?.url ||
+    bundle.assets.find((entry) => entry.relicId === relicId && entry.type === "print_file")?.url ||
+    ""
   );
+}
+
+type ProductRow = {
+  id: string;
+  relicId: string | null;
+  kindLabel: "Wear" | "Display" | "Use";
+  title: string;
+  description: string;
+  imageUrl: string;
+  price: string;
+  remaining: number;
+  total: number;
+};
+
+function productRows(bundle: StorefrontBundle): ProductRow[] {
+  const labels = ["Wear", "Display", "Use"] as const;
+  const relicRows: ProductRow[] = bundle.relics.slice(0, 3).map((relic, index) => {
+    const sold = bundle.editions.filter((edition) => edition.relicId === relic.id && edition.status === "sold").length;
+    const total = relic.totalSupply || 8;
+    return {
+      id: relic.id,
+      relicId: relic.id,
+      kindLabel: labels[index] || "Wear",
+      title: oneLine(publicProductCopy(relic.name), 64),
+      description: publicProductCopy(relic.description).replace(/\s+/g, " ").trim(),
+      imageUrl: productImage(bundle, relic.id),
+      price: formatMoney(relic.priceCents, "usd"),
+      remaining: Math.max(0, total - sold),
+      total
+    };
+  });
+  const fallbackNames = ["Crewneck Sweatshirt", "Framed Poster", "Ceramic Mug"];
+  while (relicRows.length < 3) {
+    const index = relicRows.length;
+    relicRows.push({
+      id: `pending-${index}`,
+      relicId: null,
+      kindLabel: labels[index] || "Wear",
+      title: fallbackNames[index],
+      description: oneLine(`A quiet object shaped by ${bundle.brand.name}.`, 120),
+      imageUrl: "",
+      price: formatMoney(0, "usd"),
+      remaining: 0,
+      total: 8
+    });
+  }
+  return relicRows.slice(0, 3);
+}
+
+function percentFromBps(bps: number): string {
+  return `${bps / 100}%`;
+}
+
+function potentialEarnings(bundle: StorefrontBundle): DroplinkViewModel["potentialEarnings"] {
+  const maxGrossRevenueCents = bundle.relics.reduce((sum, relic) => sum + relic.priceCents * (relic.totalSupply || 8), 0);
+  if (maxGrossRevenueCents <= 0) return null;
+  return {
+    claimer: formatMoney(Math.round((maxGrossRevenueCents * SCOUT_BPS) / 10000), "usd"),
+    domainOwner: formatMoney(Math.round((maxGrossRevenueCents * OWNER_BPS_WITH_SCOUT) / 10000), "usd"),
+    claimerPercent: percentFromBps(SCOUT_BPS),
+    domainOwnerPercent: percentFromBps(OWNER_BPS_WITH_SCOUT)
+  };
+}
+
+function queryValue(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? value[0] || "" : value || "";
+}
+
+function faviconForUrl(value: string): string | null {
+  try {
+    return new URL("/favicon.ico", value).toString();
+  } catch {
+    return null;
+  }
+}
+
+function stateForBundle(bundle: StorefrontBundle): DroplinkState {
+  if (!bundle.activeCollection || bundle.relics.length < 3) return "processing";
+  return publicDropLinkStatus(bundle.drop) as DroplinkState;
+}
+
+async function viewModelForBundle(bundle: StorefrontBundle): Promise<DroplinkViewModel> {
+  const domain = bundle.drop?.canonicalRootDomain || bundle.brand.hostname;
+  const logoUrl = brandLogoUrl(bundle);
+  const traceId = bundle.storefront.generationTraceId || null;
+  const job = traceId ? await getGenerationJobByTraceId(traceId) : null;
+  const split = bundle.drop
+    ? revenueSplitForDrop(bundle.drop)
+    : { ownerReceivesAll: false, scoutBps: 0, ownerBps: 0, scoutActive: false };
+  return {
+    slug: bundle.storefront.slug,
+    submittedUrl: bundle.drop?.canonicalUrl || bundle.brand.canonicalUrl,
+    domain,
+    favicon: logoUrl,
+    title: brandTitle(bundle),
+    description: brandDescription(bundle),
+    state: stateForBundle(bundle),
+    dropId: bundle.drop?.id || null,
+    jobId: job?.id || null,
+    traceId,
+    scoutLabel: displayScout(bundle.drop?.creatorDisplayName || bundle.drop?.summonerWallet),
+    ownerReceivesAll: split.ownerReceivesAll,
+    potentialEarnings: potentialEarnings(bundle),
+    products: productRows(bundle)
+  };
 }
 
 export async function generateMetadata({ params }: { params: { brandSlug: string } }): Promise<Metadata> {
   const bundle = await getStorefrontBundleBySlug(params.brandSlug);
-  if (!bundle || bundle.drop?.status === "archived" || !bundle.activeCollection) return {};
+  if (!bundle || bundle.drop?.status === "archived") return {};
   const baseUrl = (process.env.DROPLINK_PUBLIC_BASE_URL || process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "");
-  const title = `${bundle.drop?.canonicalRootDomain || bundle.brand.hostname} finite DropLink`;
-  const description = publicProductCopy(bundle.activeCollection.subtitle);
-  const image = bundle.ogImage?.imageUrl || `${baseUrl}/api/og/${bundle.activeCollection.id}.png`;
+  const title = `${bundle.drop?.canonicalRootDomain || bundle.brand.hostname}`;
+  const description = brandDescription(bundle);
+  const image = bundle.ogImage?.imageUrl || (bundle.activeCollection ? `${baseUrl}/api/og/${bundle.activeCollection.id}.png` : undefined);
   return {
     title,
     description,
@@ -67,13 +163,13 @@ export async function generateMetadata({ params }: { params: { brandSlug: string
       title,
       description,
       url: `${baseUrl}/${bundle.storefront.slug}`,
-      images: [{ url: image, width: 1200, height: 630, alt: `${publicProductCopy(bundle.activeCollection.title)} OG image` }]
+      images: image ? [{ url: image, width: 1200, height: 630, alt: `${publicProductCopy(bundle.activeCollection?.title || bundle.brand.name)} OG image` }] : undefined
     },
     twitter: {
       card: "summary_large_image",
       title,
       description,
-      images: [image]
+      images: image ? [image] : undefined
     }
   };
 }
@@ -83,81 +179,45 @@ export default async function StorefrontPage({
   searchParams
 }: {
   params: { brandSlug: string };
-  searchParams: { success?: string; session_id?: string };
+  searchParams: Record<string, string | string[] | undefined>;
 }) {
   const bundle = await getStorefrontBundleBySlug(params.brandSlug);
-  if (!bundle || bundle.drop?.status === "archived" || !bundle.activeCollection) notFound();
-  const dropStatus = bundle.drop?.status || "summoned";
-  const commerceOpen = dropStatus === "published";
-  const theme = themeFromBrand(bundle.brand);
-  const domainVerified = bundle.drop?.domainClaimStatus === "verified" || bundle.storefront.claimStatus === "verified";
-  const publicBaseUrl = (process.env.DROPLINK_PUBLIC_BASE_URL || process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "");
-  const publicHost = publicBaseUrl.replace(/^https?:\/\//, "");
-  const ogImageUrl = bundle.ogImage?.imageUrl || `${publicBaseUrl}/api/og/${bundle.activeCollection.id}.png`;
-  const description = brandDescription(bundle);
-  const style = {
-    "--store-primary": theme.primary,
-    "--store-secondary": theme.secondary,
-    "--store-accent": theme.accent,
-    "--store-deep": theme.deep,
-    "--store-og-image": cssImageUrl(ogImageUrl)
-  } as CSSProperties;
+  if (!bundle) {
+    const submittedUrl = queryValue(searchParams.url);
+    if (!submittedUrl) notFound();
+    let domain = queryValue(searchParams.domain);
+    let canonicalUrl = submittedUrl;
+    try {
+      const target = canonicalizeDropUrl(submittedUrl);
+      domain = domain || target.canonicalRootDomain;
+      canonicalUrl = target.canonicalUrl;
+    } catch {
+      if (!domain) domain = params.brandSlug;
+    }
+    const title = oneLine(publicProductCopy(queryValue(searchParams.title) || domain), 84);
+    const description = oneLine(publicProductCopy(queryValue(searchParams.description) || domain), 150);
+    return (
+      <DroplinkExperience
+        initial={{
+          slug: params.brandSlug,
+          submittedUrl: canonicalUrl,
+          domain,
+          favicon: queryValue(searchParams.favicon) || faviconForUrl(canonicalUrl),
+          title,
+          description,
+          state: "empty",
+          dropId: null,
+          jobId: null,
+          traceId: null,
+          scoutLabel: null,
+          ownerReceivesAll: false,
+          potentialEarnings: null,
+          products: []
+        }}
+      />
+    );
+  }
+  if (bundle.drop?.status === "archived") notFound();
 
-  return (
-    <main className="simple-drop-page" style={style}>
-      <div className="simple-drop-shell">
-        <header className="simple-drop-title">
-          <h1>{bundle.brand.name}</h1>
-          <p>{description}</p>
-        </header>
-        <section className="simple-products" aria-label="Products">
-          {bundle.relics.map((relic) => {
-            const editions = bundle.editions.filter((edition) => edition.relicId === relic.id);
-            const claimed = editions.filter((edition) => edition.status === "sold").length;
-            const left = Math.max(0, relic.totalSupply - claimed);
-            const mockup = bundle.mockups.find((entry) => entry.relicId === relic.id);
-            const preview = bundle.assets.find((entry) => entry.relicId === relic.id && entry.type === "preview");
-            const variantId = String(relic.fulfillmentSpecJson?.catalogVariantId || relic.printfulVariantId || "");
-            const productName = relic.fulfillmentSpecJson?.productName || relic.productFamily || relic.name;
-            const variantName = relic.fulfillmentSpecJson?.variantName || variantId;
-            const printfulName = `${productName}${variantName ? ` · ${variantName}` : ""}${variantId ? ` · #${variantId}` : ""}`;
-            return (
-              <DropProductCard
-                key={relic.id}
-                relicId={relic.id}
-                imageUrl={mockup?.imageUrl || preview?.url || ""}
-                title={relic.name || `Product ${relic.relicIndex || ""}`.trim()}
-                description={publicProductCopy(relic.description)}
-                printfulName={printfulName}
-                printfulUrl={printfulLink(relic)}
-                price={formatMoney(relic.priceCents, relic.currency)}
-                unitsLeft={left}
-                commerceOpen={commerceOpen}
-              />
-            );
-          })}
-        </section>
-        <footer className="simple-footer">
-          <a className="simple-footer-link" href={githubUrl} target="_blank" rel="noreferrer">
-            github
-          </a>
-          <Link className="simple-footer-link" href="/about">
-            about
-          </Link>
-          {domainVerified ? (
-            <span>claim</span>
-          ) : (
-            <form action="/api/claims/start" method="post">
-              <input type="hidden" name="storefrontId" value={bundle.storefront.id} />
-              <button className="simple-footer-link" type="submit">
-                claim
-              </button>
-            </form>
-          )}
-          <ThemeLink />
-          <span>{publicHost}/{bundle.storefront.slug}</span>
-        </footer>
-      </div>
-    </main>
-  );
+  return <DroplinkExperience initial={await viewModelForBundle(bundle)} />;
 }
