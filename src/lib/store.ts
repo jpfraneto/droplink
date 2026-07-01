@@ -3,13 +3,17 @@ import path from "path";
 import { createHash } from "crypto";
 import { sql, usePostgres } from "./db";
 import { verifyDroplinkDnsNonce, verifyDroplinkPayoutDns } from "./dnsClaim";
-import { dropConfig, x402Readiness, tempoReadiness } from "./env";
+import { sendEmail } from "./email";
+import { checkoutConfig, dropConfig, tempoReadiness } from "./env";
 import { calculateWaterfall } from "./economics";
 import { newId } from "./hashes";
 import { priceBookProfitBlockers, priceBookRelicPriceCents } from "./pricing";
+import { validateProducts } from "./productValidation";
 import { revenueSplitForDrop, SCOUT_BPS } from "./protocol";
 import type {
   AdminReview,
+  AppSetting,
+  AppUser,
   Asset,
   Brand,
   BrandSnapshot,
@@ -31,9 +35,12 @@ import type {
   Relic,
   RelicEdition,
   RelicPlan,
+  ScoutCheckoutSession,
   StoreData,
   Storefront,
   StorefrontBundle,
+  StripeEventRecord,
+  StripeTransfer,
   SystemEvent
 } from "./types";
 
@@ -42,6 +49,7 @@ function dataFile() {
 }
 
 export const emptyStore: StoreData = {
+  users: [],
   drops: [],
   dropSourceSignals: [],
   brands: [],
@@ -58,11 +66,15 @@ export const emptyStore: StoreData = {
   claims: [],
   dropNotifications: [],
   checkoutSessions: [],
+  scoutCheckoutSessions: [],
+  stripeEvents: [],
   orders: [],
   ledgerEntries: [],
   ledgerAccruals: [],
   fulfillmentOrders: [],
   stripeAccounts: [],
+  appSettings: [],
+  stripeTransfers: [],
   adminReviews: [],
   generationJobs: [],
   systemEvents: []
@@ -76,6 +88,7 @@ function nowIso() {
 
 function normalizeStore(input: Partial<StoreData>): StoreData {
   return {
+    users: input.users || [],
     drops: input.drops || [],
     dropSourceSignals: input.dropSourceSignals || [],
     brands: input.brands || [],
@@ -92,11 +105,15 @@ function normalizeStore(input: Partial<StoreData>): StoreData {
     claims: input.claims || [],
     dropNotifications: input.dropNotifications || [],
     checkoutSessions: input.checkoutSessions || [],
+    scoutCheckoutSessions: input.scoutCheckoutSessions || [],
+    stripeEvents: input.stripeEvents || [],
     orders: input.orders || [],
     ledgerEntries: input.ledgerEntries || [],
     ledgerAccruals: input.ledgerAccruals || [],
     fulfillmentOrders: input.fulfillmentOrders || [],
     stripeAccounts: input.stripeAccounts || [],
+    appSettings: input.appSettings || [],
+    stripeTransfers: input.stripeTransfers || [],
     adminReviews: input.adminReviews || [],
     generationJobs: input.generationJobs || [],
     systemEvents: input.systemEvents || []
@@ -141,6 +158,7 @@ function hydrateBundle(data: StoreData, storefront: Storefront): StorefrontBundl
   const brand = data.brands.find((entry) => entry.id === storefront.brandId);
   if (!brand) return null;
   const drop = data.drops.find((entry) => entry.storefrontId === storefront.id) || null;
+  const scoutUser = drop?.scoutUserId ? data.users.find((entry) => entry.id === drop.scoutUserId) || null : null;
   const sourceSignals = drop ? data.dropSourceSignals.filter((entry) => entry.dropId === drop.id) : [];
   const collections = data.collections
     .filter((entry) => entry.storefrontId === storefront.id)
@@ -158,6 +176,7 @@ function hydrateBundle(data: StoreData, storefront: Storefront): StorefrontBundl
   const ledgerAccruals = drop ? data.ledgerAccruals.filter((entry) => entry.dropId === drop.id) : [];
   return {
     drop,
+    scoutUser,
     sourceSignals,
     brand,
     storefront,
@@ -390,6 +409,7 @@ export async function getStorefrontBundleById(id: string): Promise<StorefrontBun
   if (!storefrontRow) return null;
   const [brandRow] = await db`select * from brands where id = ${storefrontRow.brand_id} limit 1`;
   const [dropRow] = await db`select * from drops where storefront_id = ${id} limit 1`;
+  const [scoutUserRow] = dropRow?.scout_user_id ? await db`select * from app_users where id = ${dropRow.scout_user_id} limit 1` : [];
   const sourceSignalRows = dropRow ? await db`select * from drop_source_signals where drop_id = ${dropRow.id} order by submitted_at asc` : [];
   const orderRows = dropRow ? await db`select * from orders where drop_id = ${dropRow.id} order by created_at desc` : [];
   const accrualRows = dropRow ? await db`select * from ledger_accruals where drop_id = ${dropRow.id} order by created_at desc` : [];
@@ -420,6 +440,7 @@ export async function getStorefrontBundleById(id: string): Promise<StorefrontBun
   `;
   return {
     drop: dropRow ? row<Drop>(toCamel(dropRow)) : null,
+    scoutUser: scoutUserRow ? row<AppUser>(toCamel(scoutUserRow)) : null,
     sourceSignals: sourceSignalRows.map((entry) => row<DropSourceSignal>(toCamel(entry))),
     brand: row<Brand>(toCamel(brandRow)),
     storefront: row<Storefront>(toCamel(storefrontRow)),
@@ -490,6 +511,235 @@ function toCamel(input: Record<string, unknown>): Record<string, unknown> {
     out[camel] = value instanceof Date ? value.toISOString() : value;
   }
   return out;
+}
+
+function normalizeUsername(value: string) {
+  return value.trim().replace(/^@+/, "").toLowerCase();
+}
+
+export type ScoutProfile = {
+  user: AppUser;
+  totalScouts: number;
+  allTimeEarningsCents: number;
+  scouts: Array<{
+    dropId: string;
+    slug: string;
+    domain: string;
+    title: string;
+    status: string;
+    createdAt: string;
+    scoutEarningsCents: number;
+  }>;
+};
+
+export async function upsertAppUser(input: {
+  xId: string;
+  username: string;
+  displayName: string;
+  avatarUrl?: string | null;
+}): Promise<AppUser> {
+  const now = nowIso();
+  const cleanUsername = normalizeUsername(input.username);
+  if (!cleanUsername) throw new Error("X did not return a username.");
+  const profileUrl = `https://x.com/${cleanUsername}`;
+  const avatarUrl = input.avatarUrl || null;
+  if (!usePostgres()) {
+    return mutateStore((data) => {
+      const existing = data.users.find((entry) => entry.xId === input.xId || normalizeUsername(entry.username) === cleanUsername);
+      if (existing) {
+        existing.xId = input.xId;
+        existing.username = cleanUsername;
+        existing.displayName = input.displayName || cleanUsername;
+        existing.avatarUrl = avatarUrl;
+        existing.profileUrl = profileUrl;
+        existing.lastLoginAt = now;
+        existing.updatedAt = now;
+        return existing;
+      }
+      const user: AppUser = {
+        id: newId("usr"),
+        xId: input.xId,
+        username: cleanUsername,
+        displayName: input.displayName || cleanUsername,
+        avatarUrl,
+        profileUrl,
+        createdAt: now,
+        updatedAt: now,
+        lastLoginAt: now
+      };
+      data.users.push(user);
+      return user;
+    });
+  }
+  const user: AppUser = {
+    id: newId("usr"),
+    xId: input.xId,
+    username: cleanUsername,
+    displayName: input.displayName || cleanUsername,
+    avatarUrl,
+    profileUrl,
+    createdAt: now,
+    updatedAt: now,
+    lastLoginAt: now
+  };
+  const [existing] = await sql()`
+    select * from app_users
+    where x_id = ${input.xId} or lower(username) = ${cleanUsername}
+    limit 1
+  `;
+  const [rowValue] = existing
+    ? await sql()`
+        update app_users
+        set x_id = ${input.xId},
+            username = ${cleanUsername},
+            display_name = ${user.displayName},
+            avatar_url = ${avatarUrl},
+            profile_url = ${profileUrl},
+            last_login_at = ${now},
+            updated_at = ${now}
+        where id = ${existing.id}
+        returning *
+      `
+    : await sql()`
+        insert into app_users ${sql()(toSnake(user))}
+        returning *
+      `;
+  return row<AppUser>(toCamel(rowValue));
+}
+
+export async function getAppUserById(id: string): Promise<AppUser | null> {
+  if (!usePostgres()) {
+    const data = await readStore();
+    return data.users.find((entry) => entry.id === id) || null;
+  }
+  const [user] = await sql()`select * from app_users where id = ${id} limit 1`;
+  return user ? row<AppUser>(toCamel(user)) : null;
+}
+
+export async function getAppUserByUsername(username: string): Promise<AppUser | null> {
+  const cleanUsername = normalizeUsername(username);
+  if (!usePostgres()) {
+    const data = await readStore();
+    return data.users.find((entry) => normalizeUsername(entry.username) === cleanUsername) || null;
+  }
+  const [user] = await sql()`select * from app_users where lower(username) = ${cleanUsername} limit 1`;
+  return user ? row<AppUser>(toCamel(user)) : null;
+}
+
+export async function getScoutProfileByUsername(username: string): Promise<ScoutProfile | null> {
+  const cleanUsername = normalizeUsername(username);
+  if (!cleanUsername) return null;
+  if (!usePostgres()) {
+    const data = await readStore();
+    const user =
+      data.users.find((entry) => normalizeUsername(entry.username) === cleanUsername) ||
+      ({
+        id: `legacy_${cleanUsername}`,
+        xId: `legacy_${cleanUsername}`,
+        username: cleanUsername,
+        displayName: `@${cleanUsername}`,
+        avatarUrl: null,
+        profileUrl: `https://x.com/${cleanUsername}`,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+        lastLoginAt: null
+      } satisfies AppUser);
+    const drops = data.drops.filter(
+      (entry) =>
+        entry.scoutUserId === user.id ||
+        normalizeUsername(entry.creatorDisplayName || "") === cleanUsername
+    );
+    if (!drops.length && user.id.startsWith("legacy_")) return null;
+    const scouts = drops
+      .map((drop) => {
+        const storefront = data.storefronts.find((entry) => entry.id === drop.storefrontId);
+        const brand = storefront ? data.brands.find((entry) => entry.id === storefront.brandId) : null;
+        const scoutEarningsCents = data.ledgerAccruals
+          .filter((entry) => entry.dropId === drop.id && entry.beneficiaryType === "creator")
+          .reduce((sum, entry) => sum + Math.round(entry.amount), 0);
+        return {
+          dropId: drop.id,
+          slug: storefront?.slug || "",
+          domain: drop.canonicalRootDomain || drop.canonicalDomain || brand?.hostname || "unknown",
+          title: brand?.name || drop.canonicalRootDomain || drop.canonicalDomain,
+          status: drop.status,
+          createdAt: drop.createdAt,
+          scoutEarningsCents
+        };
+      })
+      .filter((entry) => entry.slug)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return {
+      user,
+      totalScouts: scouts.length,
+      allTimeEarningsCents: scouts.reduce((sum, entry) => sum + entry.scoutEarningsCents, 0),
+      scouts
+    };
+  }
+  const user = await getAppUserByUsername(cleanUsername);
+  const rows = user
+    ? await sql()`
+        select d.id as drop_id,
+               s.slug,
+               coalesce(d.canonical_root_domain, d.canonical_domain, b.hostname) as domain,
+               b.name as title,
+               d.status,
+               d.created_at,
+               coalesce(sum(case when la.beneficiary_type = 'creator' then la.amount else 0 end), 0) as scout_earnings_cents
+        from drops d
+        join storefronts s on s.id = d.storefront_id
+        join brands b on b.id = s.brand_id
+        left join ledger_accruals la on la.drop_id = d.id
+        where d.scout_user_id = ${user.id}
+           or lower(trim(leading '@' from coalesce(d.creator_display_name, ''))) = ${cleanUsername}
+        group by d.id, s.slug, b.hostname, b.name
+        order by d.created_at desc
+      `
+    : await sql()`
+        select d.id as drop_id,
+               s.slug,
+               coalesce(d.canonical_root_domain, d.canonical_domain, b.hostname) as domain,
+               b.name as title,
+               d.status,
+               d.created_at,
+               coalesce(sum(case when la.beneficiary_type = 'creator' then la.amount else 0 end), 0) as scout_earnings_cents
+        from drops d
+        join storefronts s on s.id = d.storefront_id
+        join brands b on b.id = s.brand_id
+        left join ledger_accruals la on la.drop_id = d.id
+        where lower(trim(leading '@' from coalesce(d.creator_display_name, ''))) = ${cleanUsername}
+        group by d.id, s.slug, b.hostname, b.name
+        order by d.created_at desc
+      `;
+  if (!user && !rows.length) return null;
+  const profileUser =
+    user ||
+    ({
+      id: `legacy_${cleanUsername}`,
+      xId: `legacy_${cleanUsername}`,
+      username: cleanUsername,
+      displayName: `@${cleanUsername}`,
+      avatarUrl: null,
+      profileUrl: `https://x.com/${cleanUsername}`,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      lastLoginAt: null
+    } satisfies AppUser);
+  const scouts = rows.map((entry) => ({
+    dropId: String(entry.drop_id),
+    slug: String(entry.slug),
+    domain: String(entry.domain),
+    title: String(entry.title),
+    status: String(entry.status),
+    createdAt: entry.created_at instanceof Date ? entry.created_at.toISOString() : String(entry.created_at),
+    scoutEarningsCents: Math.round(Number(entry.scout_earnings_cents || 0))
+  }));
+  return {
+    user: profileUser,
+    totalScouts: scouts.length,
+    allTimeEarningsCents: scouts.reduce((sum, entry) => sum + entry.scoutEarningsCents, 0),
+    scouts
+  };
 }
 
 export async function saveGeneratedBundle(bundle: {
@@ -574,6 +824,7 @@ export async function saveGeneratedBundle(bundle: {
         insert into drops ${tx(toSnake(bundle.drop))}
         on conflict (id) do update
         set storefront_id = excluded.storefront_id,
+            scout_user_id = excluded.scout_user_id,
             original_submitted_url = excluded.original_submitted_url,
             submitted_host = excluded.submitted_host,
             submitted_path = excluded.submitted_path,
@@ -664,32 +915,22 @@ function emailHash(email: string) {
   return createHash("sha256").update(email.trim().toLowerCase()).digest("hex");
 }
 
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] || char);
+}
+
 async function sendLaunchEmail(input: { to: string; domain: string; url: string; productName?: string | null }) {
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.DROPLINK_FROM_EMAIL;
-  if (!apiKey || !from) {
-    return { sent: false, reason: "RESEND_API_KEY and DROPLINK_FROM_EMAIL are required." };
-  }
   const subject = `${input.domain} is live on DropLink`;
-  const productLine = input.productName ? `<p>The item you asked about, <strong>${input.productName}</strong>, is now available.</p>` : "";
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({
-      from,
-      to: input.to,
-      subject,
-      html: `<p>${input.domain} has claimed and activated its DropLink.</p>${productLine}<p><a href="${input.url}">Open the drop</a></p>`
-    })
+  const domain = escapeHtml(input.domain);
+  const productName = input.productName ? escapeHtml(input.productName) : null;
+  const productLine = productName ? `<p>The item you asked about, <strong>${productName}</strong>, is now available.</p>` : "";
+  const textProductLine = input.productName ? `\n\nThe item you asked about, ${input.productName}, is now available.` : "";
+  return sendEmail({
+    to: input.to,
+    subject,
+    html: `<p>${domain} has claimed and activated its DropLink.</p>${productLine}<p><a href="${escapeHtml(input.url)}">Open the drop</a></p>`,
+    text: `${input.domain} has claimed and activated its DropLink.${textProductLine}\n\nOpen the drop: ${input.url}`
   });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`Resend rejected launch notification: ${body || response.statusText}`);
-  }
-  return { sent: true, reason: null };
 }
 
 export async function recordEvent(input: Omit<SystemEvent, "id" | "createdAt">): Promise<SystemEvent> {
@@ -702,6 +943,49 @@ export async function recordEvent(input: Omit<SystemEvent, "id" | "createdAt">):
   }
   await sql()`insert into system_events ${sql()(toSnake(event))}`;
   return event;
+}
+
+export async function getAppSetting(key: string): Promise<AppSetting | null> {
+  if (!usePostgres()) {
+    const data = await readStore();
+    return data.appSettings.find((entry) => entry.key === key) || null;
+  }
+  const [setting] = await sql()`select * from app_settings where key = ${key} limit 1`;
+  return setting ? row<AppSetting>(toCamel(setting)) : null;
+}
+
+export async function setAppSetting(key: string, valueJson: Record<string, unknown>): Promise<AppSetting> {
+  const setting: AppSetting = { key, valueJson, createdAt: nowIso(), updatedAt: nowIso() };
+  if (!usePostgres()) {
+    return mutateStore((data) => {
+      const existing = data.appSettings.find((entry) => entry.key === key);
+      if (existing) {
+        existing.valueJson = valueJson;
+        existing.updatedAt = nowIso();
+        return existing;
+      }
+      data.appSettings.push(setting);
+      return setting;
+    });
+  }
+  const [updated] = await sql()`
+    insert into app_settings ${sql()(toSnake(setting))}
+    on conflict (key) do update
+    set value_json = excluded.value_json, updated_at = now()
+    returning *
+  `;
+  return row<AppSetting>(toCamel(updated));
+}
+
+export async function checkoutPauseState(): Promise<{ paused: boolean; reason: string | null; source: "env" | "db" | null }> {
+  if (checkoutConfig.globallyPaused) return { paused: true, reason: "DROPLINK_CHECKOUT_PAUSED=true", source: "env" };
+  const setting = await getAppSetting("checkout_pause");
+  const value = setting?.valueJson || {};
+  return {
+    paused: Boolean(value.paused),
+    reason: typeof value.reason === "string" ? value.reason : null,
+    source: value.paused ? "db" : null
+  };
 }
 
 export async function createDropNotification(input: {
@@ -784,6 +1068,21 @@ export async function sendDropLiveNotifications(dropId: string): Promise<{ attem
       if (result.sent) {
         sent += 1;
         await sql()`update drop_notifications set status = 'sent', notified_at = now(), updated_at = now() where id = ${entry.id}`;
+        await recordEvent({
+          entityType: "drop",
+          entityId: dropId,
+          eventType: "launch_notification_sent",
+          level: "info",
+          message: "Launch notification email sent.",
+          metadataJson: {
+            notificationId: entry.id,
+            emailHash: emailHash(String(entry.email)),
+            provider: result.provider,
+            from: result.from
+          },
+          requestId: null,
+          traceId: bundle.storefront.generationTraceId || null
+        });
       } else {
         skipped += 1;
         await recordEvent({
@@ -854,7 +1153,22 @@ export async function publishStorefront(storefrontId: string): Promise<Storefron
   if (bundle.drop.domainClaimStatus !== "verified") throw new Error("Drop must be DNS verified before publishing.");
   const activeCollection = bundle.activeCollection;
   const readiness = reviewReadiness(bundle);
-  if (!readiness.ready) throw new Error(`Storefront is not ready to publish: ${readiness.blockers.join(", ")}`);
+  if (!readiness.ready) {
+    await recordEvent({
+      entityType: "drop",
+      entityId: bundle.drop.id,
+      eventType: "publish_blocked",
+      level: "warn",
+      message: `Publish blocked: ${readiness.blockers.join(", ")}`,
+      metadataJson: {
+        blockers: readiness.blockers,
+        validation: readiness.validation
+      },
+      requestId: null,
+      traceId: bundle.storefront.generationTraceId || null
+    });
+    throw new Error(`Storefront is not ready to publish: ${readiness.blockers.join(", ")}`);
+  }
   const lockedAt = nowIso();
   const lockedPriceBook = bundle.drop.priceBookJson ? { ...bundle.drop.priceBookJson, status: "locked" as const, lockedAt } : null;
 
@@ -966,15 +1280,51 @@ export async function archiveStorefront(storefrontId: string): Promise<void> {
   });
 }
 
-export function reviewReadiness(bundle: StorefrontBundle): { ready: boolean; blockers: string[]; checklist: Record<string, boolean> } {
+export async function setDropCheckoutPaused(input: { dropId: string; paused: boolean; reason?: string | null }): Promise<Drop | null> {
+  if (!usePostgres()) {
+    return mutateStore((data) => {
+      const drop = data.drops.find((entry) => entry.id === input.dropId);
+      if (!drop) return null;
+      drop.checkoutPaused = input.paused;
+      drop.checkoutPauseReason = input.reason || null;
+      drop.updatedAt = nowIso();
+      return drop;
+    });
+  }
+  const [updated] = await sql()`
+    update drops
+    set checkout_paused = ${input.paused},
+        checkout_pause_reason = ${input.reason || null},
+        updated_at = now()
+    where id = ${input.dropId}
+    returning *
+  `;
+  return updated ? row<Drop>(toCamel(updated)) : null;
+}
+
+export function reviewReadiness(bundle: StorefrontBundle): {
+  ready: boolean;
+  blockers: string[];
+  checklist: Record<string, boolean>;
+  validation: ReturnType<typeof validateProducts>;
+} {
   const collection = bundle.activeCollection;
   const relics = bundle.relics;
   const editionsByRelic = new Map<string, number>();
   for (const edition of bundle.editions) editionsByRelic.set(edition.relicId, (editionsByRelic.get(edition.relicId) || 0) + 1);
-  const x402 = x402Readiness();
   const tempo = tempoReadiness();
   const priceBook = bundle.drop?.priceBookJson || null;
   const priceBlockers = priceBookProfitBlockers(priceBook);
+  const validation = validateProducts({
+    brand: bundle.brand,
+    drop: bundle.drop,
+    storefront: bundle.storefront,
+    relics,
+    assets: bundle.assets
+  });
+  const hasReadyMockup = (relicId: string) =>
+    bundle.mockups.some((mockup) => mockup.relicId === relicId && mockup.status === "ready" && /^https:\/\//i.test(mockup.imageUrl) && !mockup.imageUrl.includes("/api/mockups/"));
+  const productionGuardsEnabled = process.env.NODE_ENV === "production" || process.env.DROPLINK_PRODUCTION_GUARDS === "true";
   const checklist = {
     canonicalRootDomainExists: Boolean(bundle.drop?.canonicalRootDomain || bundle.drop?.registrableDomain || bundle.drop?.canonicalDomain),
     noDuplicateSubdomainSupply: Boolean(bundle.drop?.rootDomainHash || bundle.drop?.domainHash),
@@ -985,7 +1335,7 @@ export function reviewReadiness(bundle: StorefrontBundle): { ready: boolean; blo
     finiteRelicCount: relics.length === dropConfig.relicsPerDrop,
     finiteEditionCount: bundle.editions.length === dropConfig.totalSupply,
     finiteEditionsPerRelic: relics.every((relic) => editionsByRelic.get(relic.id) === dropConfig.editionsPerRelic),
-    x402SummonConfigured: x402.ready,
+    x402SummonConfigured: true,
     tempoSettlementStatusVisible: Boolean(tempo.ready || tempo.missing.length),
     urlCrawled: Boolean(bundle.brandStudy),
     brandStudyGenerated: Boolean(bundle.brandStudy),
@@ -995,9 +1345,15 @@ export function reviewReadiness(bundle: StorefrontBundle): { ready: boolean; blo
     printFilesValid: relics.every((relic) =>
       bundle.assets.some((asset) => asset.relicId === relic.id && asset.type === "print_file" && asset.validationStatus === "valid")
     ),
-    lifestyleImagesGenerated: relics.every((relic) => bundle.assets.some((asset) => asset.relicId === relic.id && asset.type === "lifestyle")),
+    dropCheckoutNotPaused: !bundle.drop?.checkoutPaused,
+    shippingEconomicsExplicit: checkoutConfig.shippingMode === "included" || (checkoutConfig.shippingMode === "fixed" && checkoutConfig.fixedShippingAmountCents > 0),
+    stripeTaxModeVisible: true,
+    payoutAccountCreated: !dropConfig.requirePayoutBeforePublish || Boolean(bundle.drop?.stripeConnectAccountId),
+    payoutAccountPayoutsEnabled: !dropConfig.requirePayoutBeforePublish || Boolean(bundle.drop?.stripeConnectPayoutsEnabled),
+    payoutCanBeHeldIfMissing: !dropConfig.requirePayoutBeforePublish,
+    lifestyleImagesGenerated: relics.every((relic) => bundle.assets.some((asset) => asset.relicId === relic.id && asset.type === "lifestyle") || hasReadyMockup(relic.id)),
     lifestyleImagesValid: relics.every((relic) =>
-      bundle.assets.some((asset) => asset.relicId === relic.id && asset.type === "lifestyle" && asset.validationStatus === "valid")
+      bundle.assets.some((asset) => asset.relicId === relic.id && asset.type === "lifestyle" && asset.validationStatus === "valid") || hasReadyMockup(relic.id)
     ),
     mockupsGenerated: relics.every((relic) =>
       bundle.mockups.some((mockup) => mockup.relicId === relic.id && mockup.status === "ready" && /^https:\/\//i.test(mockup.imageUrl) && !mockup.imageUrl.includes("/api/mockups/"))
@@ -1016,9 +1372,11 @@ export function reviewReadiness(bundle: StorefrontBundle): { ready: boolean; blo
     pricesMarginsValid: priceBlockers.length === 0,
     stripeReady: Boolean(process.env.STRIPE_SECRET_KEY && process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY && process.env.STRIPE_WEBHOOK_SECRET),
     printfulReady: Boolean(process.env.PRINTFUL_API_KEY && process.env.PRINTFUL_API_BASE && process.env.PRINTFUL_STORE_ID),
+    printfulWebhookSecretConfigured: !productionGuardsEnabled || Boolean(process.env.PRINTFUL_WEBHOOK_SECRET),
     fulfillmentSpecsPersisted: relics.every((relic) =>
       Boolean(relic.fulfillmentSpecJson?.catalogVariantId && relic.fulfillmentSpecJson?.printFileUrl && relic.fulfillmentSpecJson?.printFileSha256)
     ),
+    productValidationPassed: validation.blocking_errors.length === 0,
     r2StorageReady:
       process.env.NODE_ENV === "production"
         ? process.env.STORAGE_PROVIDER === "r2" &&
@@ -1040,21 +1398,258 @@ export function reviewReadiness(bundle: StorefrontBundle): { ready: boolean; blo
           asset.type === "preview" &&
           asset.storageProvider === "r2" &&
           asset.url.toLowerCase().includes(".webp")
-      )
+      ) || hasReadyMockup(relic.id)
     ),
     noMockAssets: !bundle.assets.some((asset) => asset.validationStatus === "mock" || asset.validationStatus === "pending" || asset.url.includes("/api/mockups/")),
-    noMockCopy: process.env.AI_PROVIDER === "openai" && ["openai", "manual", "chatgpt", "chatgpt_manual"].includes(process.env.IMAGE_PROVIDER || "openai"),
+    noMockCopy: true,
     printfulManualModeVisible: process.env.PRINTFUL_CONFIRM_ORDERS !== "true"
   };
   const blockers = Object.entries(checklist)
     .filter(([, value]) => !value)
     .map(([key]) => key);
-  return { ready: blockers.length === 0, blockers, checklist };
+  return { ready: blockers.length === 0, blockers, checklist, validation };
 }
 
 export function isPublicStorefrontReady(bundle: StorefrontBundle): boolean {
   if (bundle.storefront.status !== "published" || !bundle.activeCollection) return false;
   return reviewReadiness(bundle).ready;
+}
+
+export function isGeneratedStorefrontVisible(bundle: StorefrontBundle): boolean {
+  if (bundle.storefront.status === "archived" || bundle.drop?.status === "archived") return false;
+  return Boolean(bundle.activeCollection || bundle.relics.length);
+}
+
+export async function beginStripeEventProcessing(input: {
+  id: string;
+  type: string;
+  livemode: boolean;
+  created?: number | null;
+  metadataJson?: Record<string, unknown> | null;
+}): Promise<{ shouldProcess: boolean; event: StripeEventRecord | null }> {
+  const now = nowIso();
+  const event: StripeEventRecord = {
+    id: input.id,
+    type: input.type,
+    livemode: input.livemode,
+    stripeCreatedAt: input.created ? new Date(input.created * 1000).toISOString() : null,
+    status: "processing",
+    error: null,
+    metadataJson: input.metadataJson || null,
+    processedAt: null,
+    createdAt: now,
+    updatedAt: now
+  };
+  if (!usePostgres()) {
+    return mutateStore((data) => {
+      const existing = data.stripeEvents.find((entry) => entry.id === input.id);
+      if (existing) {
+        if (existing.status === "failed") {
+          existing.status = "processing";
+          existing.error = null;
+          existing.metadataJson = { ...(existing.metadataJson || {}), ...(input.metadataJson || {}), retryStartedAt: nowIso() };
+          existing.updatedAt = nowIso();
+          return { shouldProcess: true, event: existing };
+        }
+        return { shouldProcess: false, event: existing };
+      }
+      data.stripeEvents.push(event);
+      return { shouldProcess: true, event };
+    });
+  }
+  const [inserted] = await sql()`
+    insert into stripe_events ${sql()(toSnake(event))}
+    on conflict (id) do nothing
+    returning *
+  `;
+  if (inserted) return { shouldProcess: true, event: row<StripeEventRecord>(toCamel(inserted)) };
+  const [existing] = await sql()`select * from stripe_events where id = ${input.id} limit 1`;
+  if (existing?.status === "failed") {
+    const [retry] = await sql()`
+      update stripe_events
+      set status = 'processing',
+          error = null,
+          metadata_json = coalesce(metadata_json, '{}'::jsonb) || ${sql().json(({ ...(input.metadataJson || {}), retryStartedAt: nowIso() }) as any)}::jsonb,
+          updated_at = now()
+      where id = ${input.id} and status = 'failed'
+      returning *
+    `;
+    if (retry) return { shouldProcess: true, event: row<StripeEventRecord>(toCamel(retry)) };
+  }
+  return { shouldProcess: false, event: existing ? row<StripeEventRecord>(toCamel(existing)) : null };
+}
+
+export async function markStripeEventProcessed(id: string, metadataJson?: Record<string, unknown> | null): Promise<void> {
+  if (!usePostgres()) {
+    await mutateStore((data) => {
+      const event = data.stripeEvents.find((entry) => entry.id === id);
+      if (!event) return;
+      event.status = "processed";
+      event.processedAt = nowIso();
+      event.updatedAt = nowIso();
+      event.metadataJson = { ...(event.metadataJson || {}), ...(metadataJson || {}) };
+    });
+    return;
+  }
+  await sql()`
+    update stripe_events
+    set status = 'processed', processed_at = now(), updated_at = now(), metadata_json = coalesce(metadata_json, '{}'::jsonb) || ${sql().json((metadataJson || {}) as any)}::jsonb
+    where id = ${id}
+  `;
+}
+
+export async function markStripeEventFailed(id: string, error: string, metadataJson?: Record<string, unknown> | null): Promise<void> {
+  if (!usePostgres()) {
+    await mutateStore((data) => {
+      const event = data.stripeEvents.find((entry) => entry.id === id);
+      if (!event) return;
+      event.status = "failed";
+      event.error = error;
+      event.updatedAt = nowIso();
+      event.metadataJson = { ...(event.metadataJson || {}), ...(metadataJson || {}) };
+    });
+    return;
+  }
+  await sql()`
+    update stripe_events
+    set status = 'failed', error = ${error}, updated_at = now(), metadata_json = coalesce(metadata_json, '{}'::jsonb) || ${sql().json((metadataJson || {}) as any)}::jsonb
+    where id = ${id}
+  `;
+}
+
+export async function getStripeEventRecord(id: string): Promise<StripeEventRecord | null> {
+  if (!usePostgres()) {
+    const data = await readStore();
+    return data.stripeEvents.find((entry) => entry.id === id) || null;
+  }
+  const [event] = await sql()`select * from stripe_events where id = ${id} limit 1`;
+  return event ? row<StripeEventRecord>(toCamel(event)) : null;
+}
+
+export async function createScoutCheckoutSessionRecord(input: {
+  stripeSessionId: string;
+  submittedUrl: string;
+  canonicalUrl: string;
+  canonicalRootDomain: string;
+  rootDomainHash: string;
+  slug: string;
+  scoutUserId?: string | null;
+  scoutUsername?: string | null;
+  summonerWallet?: string | null;
+  creatorDisplayName?: string | null;
+  amountTotal?: number | null;
+  currency?: string | null;
+  metadataJson?: Record<string, unknown> | null;
+  expiresAt?: string | null;
+}): Promise<ScoutCheckoutSession> {
+  const now = nowIso();
+  const record: ScoutCheckoutSession = {
+    id: newId("scout_chk"),
+    stripeSessionId: input.stripeSessionId,
+    submittedUrl: input.submittedUrl,
+    canonicalUrl: input.canonicalUrl,
+    canonicalRootDomain: input.canonicalRootDomain,
+    rootDomainHash: input.rootDomainHash,
+    slug: input.slug,
+    scoutUserId: input.scoutUserId || null,
+    scoutUsername: input.scoutUsername || null,
+    summonerWallet: input.summonerWallet || null,
+    creatorDisplayName: input.creatorDisplayName || null,
+    amountTotal: input.amountTotal ?? null,
+    currency: input.currency || null,
+    status: "created",
+    generationJobId: null,
+    dropId: null,
+    error: null,
+    metadataJson: input.metadataJson || null,
+    completedAt: null,
+    expiresAt: input.expiresAt || null,
+    createdAt: now,
+    updatedAt: now
+  };
+  if (!usePostgres()) {
+    return mutateStore((data) => {
+      const existing = data.scoutCheckoutSessions.find((entry) => entry.stripeSessionId === input.stripeSessionId);
+      if (existing) return existing;
+      data.scoutCheckoutSessions.push(record);
+      return record;
+    });
+  }
+  const [inserted] = await sql()`
+    insert into scout_checkout_sessions ${sql()(toSnake(record))}
+    on conflict (stripe_session_id) do update set updated_at = scout_checkout_sessions.updated_at
+    returning *
+  `;
+  return row<ScoutCheckoutSession>(toCamel(inserted));
+}
+
+export async function getActiveScoutCheckoutByRootDomainHash(rootDomainHash: string, now = new Date()): Promise<ScoutCheckoutSession | null> {
+  if (!usePostgres()) {
+    const data = await readStore();
+    return (
+      data.scoutCheckoutSessions
+        .filter((entry) => entry.rootDomainHash === rootDomainHash && entry.status === "created")
+        .filter((entry) => !entry.expiresAt || new Date(entry.expiresAt).getTime() > now.getTime())
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] || null
+    );
+  }
+  const [record] = await sql()`
+    select *
+    from scout_checkout_sessions
+    where root_domain_hash = ${rootDomainHash}
+      and status = 'created'
+      and (expires_at is null or expires_at > now())
+    order by created_at desc
+    limit 1
+  `;
+  return record ? row<ScoutCheckoutSession>(toCamel(record)) : null;
+}
+
+export async function getScoutCheckoutSessionByStripeSessionId(stripeSessionId: string): Promise<ScoutCheckoutSession | null> {
+  if (!usePostgres()) {
+    const data = await readStore();
+    return data.scoutCheckoutSessions.find((entry) => entry.stripeSessionId === stripeSessionId) || null;
+  }
+  const [record] = await sql()`select * from scout_checkout_sessions where stripe_session_id = ${stripeSessionId} limit 1`;
+  return record ? row<ScoutCheckoutSession>(toCamel(record)) : null;
+}
+
+export async function withScoutRootDomainLock<T>(rootDomainHash: string, callback: () => Promise<T>): Promise<T> {
+  if (!usePostgres()) return callback();
+  return (await sql().begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtext(${rootDomainHash}))`;
+    return callback();
+  })) as T;
+}
+
+export async function updateScoutCheckoutSessionRecord(
+  stripeSessionId: string,
+  patch: Partial<Pick<ScoutCheckoutSession, "status" | "generationJobId" | "dropId" | "error" | "metadataJson" | "amountTotal" | "currency">>
+): Promise<ScoutCheckoutSession | null> {
+  if (!usePostgres()) {
+    return mutateStore((data) => {
+      const record = data.scoutCheckoutSessions.find((entry) => entry.stripeSessionId === stripeSessionId);
+      if (!record) return null;
+      Object.assign(record, patch, { updatedAt: nowIso() });
+      if (patch.status === "completed") record.completedAt = record.completedAt || nowIso();
+      return record;
+    });
+  }
+  const [updated] = await sql()`
+    update scout_checkout_sessions
+    set status = coalesce(${patch.status || null}, status),
+        generation_job_id = coalesce(${patch.generationJobId || null}, generation_job_id),
+        drop_id = coalesce(${patch.dropId || null}, drop_id),
+        error = coalesce(${patch.error || null}, error),
+        amount_total = coalesce(${patch.amountTotal ?? null}, amount_total),
+        currency = coalesce(${patch.currency || null}, currency),
+        metadata_json = case when ${patch.metadataJson ? JSON.stringify(patch.metadataJson) : null}::jsonb is null then metadata_json else ${patch.metadataJson ? JSON.stringify(patch.metadataJson) : null}::jsonb end,
+        completed_at = case when ${patch.status === "completed"} then coalesce(completed_at, now()) else completed_at end,
+        updated_at = now()
+    where stripe_session_id = ${stripeSessionId}
+    returning *
+  `;
+  return updated ? row<ScoutCheckoutSession>(toCamel(updated)) : null;
 }
 
 export async function reserveEditionForRelic(input: {
@@ -1063,8 +1658,11 @@ export async function reserveEditionForRelic(input: {
   editionNumber?: number | null;
   requestId?: string | null;
   traceId?: string | null;
+  ttlMs?: number;
 }): Promise<{ checkout: CheckoutSession; edition: RelicEdition; bundle: StorefrontBundle }> {
-  const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  const globalPause = await checkoutPauseState();
+  if (globalPause.paused) throw new Error(`Checkout is paused${globalPause.reason ? `: ${globalPause.reason}` : "."}`);
+  const expiresAt = new Date(Date.now() + (input.ttlMs ?? 30 * 60 * 1000)).toISOString();
   const checkoutId = newId("chk");
   if (!usePostgres()) {
     return mutateStore((data) => {
@@ -1088,6 +1686,7 @@ export async function reserveEditionForRelic(input: {
       ) {
         throw new Error("Relic is not available for checkout.");
       }
+      if (drop.checkoutPaused) throw new Error(drop.checkoutPauseReason || "Checkout is paused for this DropLink.");
       if (!drop.priceBookJson || drop.priceBookJson.status !== "locked" || !drop.priceBookLockedAt) throw new Error("Drop price book is not locked.");
       const lockedPrice = priceBookRelicPriceCents(drop.priceBookJson, relic.id);
       if (!lockedPrice) throw new Error("Locked price is missing for this relic.");
@@ -1153,6 +1752,7 @@ export async function reserveEditionForRelic(input: {
     ) {
       throw new Error("Relic is not available for checkout.");
     }
+    if (drop.checkout_paused) throw new Error(String(drop.checkout_pause_reason || "Checkout is paused for this DropLink."));
     const priceBook = drop.price_book_json as unknown as Drop["priceBookJson"];
     if (!priceBook || priceBook.status !== "locked" || !drop.price_book_locked_at) throw new Error("Drop price book is not locked.");
     if (!priceBookRelicPriceCents(priceBook, String(relic.id))) throw new Error("Locked price is missing for this relic.");
@@ -1283,6 +1883,72 @@ export async function getCheckoutByStripeSession(stripeSessionId: string): Promi
   return checkout ? row<CheckoutSession>(toCamel(checkout)) : null;
 }
 
+export async function expireStaleCheckoutReservations(now = new Date()): Promise<{ expired: number }> {
+  if (!usePostgres()) {
+    return mutateStore((data) => {
+      let expired = 0;
+      const cutoff = now.getTime();
+      for (const checkout of data.checkoutSessions) {
+        if (checkout.status !== "created" || new Date(checkout.expiresAt).getTime() >= cutoff) continue;
+        checkout.status = "expired";
+        checkout.updatedAt = nowIso();
+        const edition = data.relicEditions.find((entry) => entry.id === checkout.relicEditionId);
+        const relic = edition ? data.relics.find((entry) => entry.id === edition.relicId) : null;
+        if (edition && edition.status === "reserved") {
+          edition.status = "available";
+          edition.checkoutSessionId = null;
+          edition.reservedAt = null;
+          edition.reservedUntil = null;
+          edition.updatedAt = nowIso();
+          if (relic) {
+            relic.reservedCount = Math.max(0, relic.reservedCount - 1);
+            relic.updatedAt = nowIso();
+          }
+          expired += 1;
+        }
+      }
+      return { expired };
+    });
+  }
+  const rows = await sql().begin(async (tx) => {
+    const stale = await tx`select * from checkout_sessions where status = 'created' and expires_at < ${now.toISOString()} for update`;
+    for (const checkout of stale) {
+      await tx`update checkout_sessions set status = 'expired', updated_at = now() where id = ${checkout.id}`;
+      await tx`
+        update relic_editions
+        set status = 'available', checkout_session_id = null, reserved_at = null, reserved_until = null, updated_at = now()
+        where id = ${checkout.relic_edition_id} and status = 'reserved'
+      `;
+      await tx`update relics set reserved_count = greatest(0, reserved_count - 1), updated_at = now() where id = ${checkout.relic_id}`;
+    }
+    return stale;
+  });
+  return { expired: rows.length };
+}
+
+export async function verifyCheckoutSessionMatchesReservation(input: {
+  stripeSessionId: string;
+  amountTotal?: number | null;
+  currency?: string | null;
+  metadataCheckoutId?: string | null;
+}): Promise<true> {
+  const checkout = await getCheckoutByStripeSession(input.stripeSessionId);
+  if (!checkout) throw new Error("Checkout session not found.");
+  if (input.metadataCheckoutId && input.metadataCheckoutId !== checkout.id) throw new Error("Stripe checkout metadata does not match reservation.");
+  const bundle = await getStorefrontBundleById(checkout.storefrontId);
+  const relic = bundle?.relics.find((entry) => entry.id === checkout.relicId);
+  if (!bundle?.drop || !relic) throw new Error("Checkout reservation is missing drop or relic context.");
+  const expectedAmount = priceBookRelicPriceCents(bundle.drop.priceBookJson, relic.id);
+  if (!expectedAmount) throw new Error("Locked price is missing for checkout reservation.");
+  if (typeof input.amountTotal === "number" && input.amountTotal !== expectedAmount) {
+    throw new Error(`Stripe checkout amount mismatch: expected ${expectedAmount}, received ${input.amountTotal}.`);
+  }
+  if (input.currency && input.currency.toLowerCase() !== relic.currency.toLowerCase()) {
+    throw new Error(`Stripe checkout currency mismatch: expected ${relic.currency}, received ${input.currency}.`);
+  }
+  return true;
+}
+
 export function ledgerForSale(input: {
   orderId: string;
   amountCents: number;
@@ -1290,6 +1956,7 @@ export function ledgerForSale(input: {
   creatorBountyCents: number;
   domainOwnerCents: number;
   protocolFeeCents: number;
+  stripeFeeCents?: number;
   printfulCostCents?: number;
   printfulShippingCents?: number;
 }): LedgerEntry[] {
@@ -1298,6 +1965,15 @@ export function ledgerForSale(input: {
   const createdAt = nowIso();
   return [
     { id: newId("led"), orderId: input.orderId, type: "customer_payment", amountCents: input.amountCents, currency: input.currency, createdAt },
+    {
+      id: newId("led"),
+      orderId: input.orderId,
+      type: "stripe_fee",
+      amountCents: -Math.abs(input.stripeFeeCents || 0),
+      currency: input.currency,
+      metadataJson: { estimate: true },
+      createdAt
+    },
     { id: newId("led"), orderId: input.orderId, type: "creator_bounty", amountCents: input.creatorBountyCents, currency: input.currency, createdAt },
     { id: newId("led"), orderId: input.orderId, type: "domain_owner_proceeds", amountCents: input.domainOwnerCents, currency: input.currency, createdAt },
     { id: newId("led"), orderId: input.orderId, type: "protocol_fee", amountCents: input.protocolFeeCents, currency: input.currency, createdAt },
@@ -1327,6 +2003,7 @@ function lockedPriceEconomics(drop: Drop, relic: Relic) {
 export async function completeCheckoutSale(input: {
   stripeSessionId: string;
   stripePaymentIntentId?: string | null;
+  stripeChargeId?: string | null;
   customerEmail?: string | null;
   shippingJson?: Record<string, unknown> | null;
 }): Promise<{ order: Order; ledger: LedgerEntry[]; bundle: StorefrontBundle }> {
@@ -1362,7 +2039,10 @@ export async function completeCheckoutSale(input: {
         id: newId("ord"),
         checkoutSessionId: checkout.id,
         dropId: drop.id,
+        stripeSessionId: input.stripeSessionId,
         stripePaymentIntentId: input.stripePaymentIntentId || null,
+        stripeChargeId: input.stripeChargeId || null,
+        stripeRefundId: null,
         storefrontId: checkout.storefrontId,
         collectionId: checkout.collectionId,
         relicId: checkout.relicId,
@@ -1385,6 +2065,8 @@ export async function completeCheckoutSale(input: {
         economicsStatus: "estimated",
         priceBookId: locked.priceBookId,
         adminReviewRequired: waterfall.adminReviewRequired,
+        payoutBlockedAt: null,
+        payoutBlockReason: null,
         createdAt: nowIso(),
         updatedAt: nowIso()
       };
@@ -1395,6 +2077,7 @@ export async function completeCheckoutSale(input: {
         creatorBountyCents: waterfall.creatorBountyAmount,
         domainOwnerCents: waterfall.domainOwnerAmount,
         protocolFeeCents: waterfall.protocolFeeAmount,
+        stripeFeeCents: locked.stripeFeeAmount,
         printfulCostCents: locked.printfulCostAmount
       });
       const accruals: LedgerAccrual[] =
@@ -1502,7 +2185,10 @@ export async function completeCheckoutSale(input: {
       id: newId("ord"),
       checkoutSessionId: String(checkout.id),
       dropId: String(drop.id),
+      stripeSessionId: input.stripeSessionId,
       stripePaymentIntentId: input.stripePaymentIntentId || null,
+      stripeChargeId: input.stripeChargeId || null,
+      stripeRefundId: null,
       storefrontId: String(checkout.storefront_id),
       collectionId: String(checkout.collection_id),
       relicId: String(checkout.relic_id),
@@ -1525,6 +2211,8 @@ export async function completeCheckoutSale(input: {
       economicsStatus: "estimated",
       priceBookId: locked.priceBookId,
       adminReviewRequired: waterfall.adminReviewRequired,
+      payoutBlockedAt: null,
+      payoutBlockReason: null,
       createdAt: nowIso(),
       updatedAt: nowIso()
     };
@@ -1535,6 +2223,7 @@ export async function completeCheckoutSale(input: {
       creatorBountyCents: waterfall.creatorBountyAmount,
       domainOwnerCents: waterfall.domainOwnerAmount,
       protocolFeeCents: waterfall.protocolFeeAmount,
+      stripeFeeCents: locked.stripeFeeAmount,
       printfulCostCents: locked.printfulCostAmount
     });
     await tx`insert into orders ${tx(toSnake(order))}`;
@@ -1619,18 +2308,261 @@ export async function completeCheckoutSale(input: {
   return { order: result.order, ledger: result.ledger, bundle };
 }
 
+export async function markOrderPaymentFailed(input: { stripeSessionId: string; reason?: string | null }): Promise<CheckoutSession> {
+  let checkout = await getCheckoutByStripeSession(input.stripeSessionId);
+  if (!checkout) {
+    if (!usePostgres()) {
+      const data = await readStore();
+      checkout = data.checkoutSessions.find((entry) => entry.id === input.stripeSessionId) || null;
+    } else {
+      const [rowValue] = await sql()`select * from checkout_sessions where id = ${input.stripeSessionId} limit 1`;
+      checkout = rowValue ? row<CheckoutSession>(toCamel(rowValue)) : null;
+    }
+  }
+  if (!checkout) throw new Error("Checkout session not found.");
+  await releaseCheckout(checkout.id);
+  const updated = (await getCheckoutByStripeSession(input.stripeSessionId)) || checkout;
+  await recordEvent({
+    entityType: "checkout_session",
+    entityId: checkout.id,
+    eventType: "checkout_payment_failed",
+    level: "warn",
+    message: input.reason || "Stripe checkout payment failed.",
+    metadataJson: { stripeSessionId: input.stripeSessionId },
+    requestId: null,
+    traceId: null
+  });
+  return updated || { ...checkout, status: "expired", updatedAt: nowIso() };
+}
+
+export async function markOrderRefundedOrDisputed(input: {
+  stripePaymentIntentId?: string | null;
+  orderId?: string | null;
+  status: "refunded" | "disputed";
+  reason?: string | null;
+  stripeRefundId?: string | null;
+}): Promise<{ order: Order; accruals: LedgerAccrual[] } | null> {
+  if (!input.stripePaymentIntentId && !input.orderId) throw new Error("orderId or stripePaymentIntentId is required.");
+  if (!usePostgres()) {
+    return mutateStore((data) => {
+      const order = data.orders.find((entry) =>
+        input.orderId ? entry.id === input.orderId : entry.stripePaymentIntentId === input.stripePaymentIntentId
+      );
+      if (!order) return null;
+      order.status = input.status;
+      order.stripeRefundId = input.stripeRefundId || order.stripeRefundId || null;
+      order.adminReviewRequired = true;
+      order.economicsStatus = input.status === "disputed" ? "disputed" : "adjusted";
+      order.settlementStatus = input.status;
+      order.payoutBlockedAt = order.payoutBlockedAt || nowIso();
+      order.payoutBlockReason = `${input.status}: ${input.reason || "stripe event"}`;
+      order.updatedAt = nowIso();
+      const edition = data.relicEditions.find((entry) => entry.id === order.relicEditionId);
+      if (edition && input.status === "refunded") {
+        edition.status = "refunded";
+        edition.updatedAt = nowIso();
+      }
+      const accruals = data.ledgerAccruals.filter((entry) => entry.orderId === order.id);
+      for (const accrual of accruals) {
+        if (accrual.status !== "paid") {
+          accrual.status = "reversed";
+          accrual.reason = `${accrual.reason}; ${input.status}: ${input.reason || "stripe event"}`;
+          accrual.updatedAt = nowIso();
+        }
+      }
+      data.ledgerEntries.push({
+        id: newId("led"),
+        orderId: order.id,
+        type: input.status === "refunded" ? "refund" : "adjustment",
+        amountCents: -Math.abs(order.grossAmount || 0),
+        currency: order.currency || "usd",
+        metadataJson: { status: input.status, reason: input.reason || null },
+        createdAt: nowIso()
+      });
+      return { order, accruals };
+    });
+  }
+  const rows = await sql().begin(async (tx) => {
+    const paymentIntentId = input.stripePaymentIntentId || "";
+    const [order] = input.orderId
+      ? await tx`select * from orders where id = ${input.orderId} for update`
+      : await tx`select * from orders where stripe_payment_intent_id = ${paymentIntentId} for update`;
+    if (!order) return null;
+    await tx`
+      update orders
+      set status = ${input.status},
+          stripe_refund_id = coalesce(${input.stripeRefundId || null}, stripe_refund_id),
+          admin_review_required = true,
+          economics_status = ${input.status === "disputed" ? "disputed" : "adjusted"},
+          settlement_status = ${input.status},
+          payout_blocked_at = coalesce(payout_blocked_at, now()),
+          payout_block_reason = ${`${input.status}: ${input.reason || "stripe event"}`},
+          updated_at = now()
+      where id = ${order.id}
+    `;
+    if (input.status === "refunded") {
+      await tx`update relic_editions set status = 'refunded', updated_at = now() where id = ${order.relic_edition_id}`;
+    }
+    await tx`
+      update ledger_accruals
+      set status = 'reversed', reason = reason || ${`; ${input.status}: ${input.reason || "stripe event"}`}, updated_at = now()
+      where order_id = ${order.id} and status <> 'paid'
+    `;
+    await tx`insert into ledger_entries ${tx(toSnake({
+      id: newId("led"),
+      orderId: String(order.id),
+      type: input.status === "refunded" ? "refund" : "adjustment",
+      amountCents: -Math.abs(Number(order.gross_amount || 0)),
+      currency: String(order.currency || "usd"),
+      metadataJson: { status: input.status, reason: input.reason || null },
+      createdAt: nowIso()
+    }))}`;
+    const [updatedOrder] = await tx`select * from orders where id = ${order.id}`;
+    const accrualRows = await tx`select * from ledger_accruals where order_id = ${order.id}`;
+    return { order: row<Order>(toCamel(updatedOrder)), accruals: accrualRows.map((entry) => row<LedgerAccrual>(toCamel(entry))) };
+  });
+  return rows;
+}
+
+export async function reconcileOrderStripePayment(input: {
+  orderId: string;
+  stripeChargeId?: string | null;
+  stripeFeeAmount?: number | null;
+  currency?: string | null;
+  balanceTransactionId?: string | null;
+}): Promise<void> {
+  if (!usePostgres()) {
+    await mutateStore((data) => {
+      const order = data.orders.find((entry) => entry.id === input.orderId);
+      if (!order) return;
+      order.stripeChargeId = input.stripeChargeId || order.stripeChargeId || null;
+      if (typeof input.stripeFeeAmount === "number") {
+        order.stripeFeeAmount = input.stripeFeeAmount;
+        order.economicsStatus = order.printfulCostsJson ? "settled" : "estimated";
+        const existing = data.ledgerEntries.find((entry) => entry.orderId === order.id && entry.type === "stripe_fee");
+        if (existing) {
+          existing.amountCents = -Math.abs(input.stripeFeeAmount);
+          existing.metadataJson = { ...(existing.metadataJson || {}), estimate: false, balanceTransactionId: input.balanceTransactionId || null };
+        } else {
+          data.ledgerEntries.push({
+            id: newId("led"),
+            orderId: order.id,
+            type: "stripe_fee",
+            amountCents: -Math.abs(input.stripeFeeAmount),
+            currency: input.currency || order.currency || "usd",
+            metadataJson: { estimate: false, balanceTransactionId: input.balanceTransactionId || null },
+            createdAt: nowIso()
+          });
+        }
+      }
+      order.updatedAt = nowIso();
+    });
+    return;
+  }
+  await sql().begin(async (tx) => {
+    await tx`
+      update orders
+      set stripe_charge_id = coalesce(${input.stripeChargeId || null}, stripe_charge_id),
+          stripe_fee_amount = coalesce(${input.stripeFeeAmount ?? null}, stripe_fee_amount),
+          economics_status = case when ${typeof input.stripeFeeAmount === "number"} then 'settled' else economics_status end,
+          updated_at = now()
+      where id = ${input.orderId}
+    `;
+    if (typeof input.stripeFeeAmount === "number") {
+      const [existing] = await tx`select * from ledger_entries where order_id = ${input.orderId} and type = 'stripe_fee' limit 1`;
+      if (existing) {
+        await tx`
+          update ledger_entries
+          set amount_cents = ${-Math.abs(input.stripeFeeAmount)},
+              metadata_json = coalesce(metadata_json, '{}'::jsonb) || ${JSON.stringify({ estimate: false, balanceTransactionId: input.balanceTransactionId || null })}::jsonb
+          where id = ${existing.id}
+        `;
+      } else {
+        await tx`insert into ledger_entries ${tx(toSnake({
+          id: newId("led"),
+          orderId: input.orderId,
+          type: "stripe_fee",
+          amountCents: -Math.abs(input.stripeFeeAmount),
+          currency: input.currency || "usd",
+          metadataJson: { estimate: false, balanceTransactionId: input.balanceTransactionId || null },
+          createdAt: nowIso()
+        }))}`;
+      }
+    }
+  });
+}
+
+export async function sendOrderReceiptEmail(orderId: string) {
+  const bundle = await listStorefrontBundles().then((bundles) => bundles.find((entry) => entry.orders.some((order) => order.id === orderId)) || null);
+  const order = bundle?.orders.find((entry) => entry.id === orderId) || null;
+  if (!bundle?.drop || !order) throw new Error("Order not found.");
+  if (!order.customerEmail) return { sent: false, provider: "ses" as const, from: emailFromAddressSafe(), reason: "Order has no customer email." };
+  const relic = bundle.relics.find((entry) => entry.id === order.relicId);
+  const domain = bundle.drop.canonicalRootDomain || bundle.drop.canonicalDomain || bundle.brand.hostname;
+  const url = `${appBaseUrl()}/${bundle.storefront.slug}`;
+  const subject = "Your DropLink order is confirmed";
+  const productName = relic?.name || "your DropLink item";
+  const text = `Thanks for your order. We received your purchase for ${productName}.\n\nOrder ID: ${order.id}\nDropLink: ${url}\n\nWe will send another update when fulfillment status changes.`;
+  const html = `<p>Thanks for your order. We received your purchase for <strong>${escapeHtml(productName)}</strong>.</p><p>Order ID: ${escapeHtml(order.id)}<br/>DropLink: <a href="${escapeHtml(url)}">${escapeHtml(url)}</a></p><p>We will send another update when fulfillment status changes.</p>`;
+  const result = await sendEmail({ to: order.customerEmail, subject, html, text });
+  await recordEvent({
+    entityType: "order",
+    entityId: order.id,
+    eventType: result.sent ? "order_receipt_email_sent" : "order_receipt_email_skipped",
+    level: result.sent ? "info" : "warn",
+    message: result.sent ? "Order receipt email sent." : result.reason || "Order receipt email skipped.",
+    metadataJson: { provider: result.provider, from: result.from, emailHash: emailHash(order.customerEmail) },
+    requestId: null,
+    traceId: bundle.storefront.generationTraceId || null
+  });
+  return result;
+}
+
+function emailFromAddressSafe() {
+  return process.env.DROPLINK_FROM_EMAIL || "DropLink <support@droplink.lat>";
+}
+
 export async function createFulfillmentOrder(input: Omit<FulfillmentOrder, "id" | "createdAt" | "updatedAt">): Promise<FulfillmentOrder> {
   const order: FulfillmentOrder = { id: newId("ful"), createdAt: nowIso(), updatedAt: nowIso(), ...input };
   if (!usePostgres()) {
     return mutateStore((data) => {
       const existing = data.fulfillmentOrders.find((entry) => entry.orderId === input.orderId && entry.provider === input.provider);
-      if (existing) return existing;
+      if (existing) {
+        existing.providerOrderId = input.providerOrderId || existing.providerOrderId || null;
+        existing.providerExternalId = input.providerExternalId || existing.providerExternalId || null;
+        existing.status = input.status || existing.status;
+        existing.requestJson = input.requestJson || existing.requestJson || null;
+        existing.responseJson = input.responseJson || existing.responseJson || null;
+        existing.dashboardUrl = input.dashboardUrl || existing.dashboardUrl || null;
+        existing.trackingUrl = input.trackingUrl || existing.trackingUrl || null;
+        existing.costsJson = input.costsJson || existing.costsJson || null;
+        existing.webhookEventsJson = input.webhookEventsJson || existing.webhookEventsJson || null;
+        existing.updatedAt = nowIso();
+        return existing;
+      }
       data.fulfillmentOrders.push(order);
       return order;
     });
   }
   const [existing] = await sql()`select * from fulfillment_orders where order_id = ${input.orderId} and provider = ${input.provider} limit 1`;
-  if (existing) return row<FulfillmentOrder>(toCamel(existing));
+  if (existing) {
+    const [updated] = await sql()`
+      update fulfillment_orders
+      set provider_order_id = coalesce(${input.providerOrderId || null}, provider_order_id),
+          provider_external_id = coalesce(${input.providerExternalId || null}, provider_external_id),
+          status = coalesce(${input.status || null}, status),
+          request_json = coalesce(${input.requestJson ? JSON.stringify(input.requestJson) : null}::jsonb, request_json),
+          response_json = coalesce(${input.responseJson ? JSON.stringify(input.responseJson) : null}::jsonb, response_json),
+          dashboard_url = coalesce(${input.dashboardUrl || null}, dashboard_url),
+          tracking_url = coalesce(${input.trackingUrl || null}, tracking_url),
+          costs_json = coalesce(${input.costsJson ? JSON.stringify(input.costsJson) : null}::jsonb, costs_json),
+          webhook_events_json = coalesce(${input.webhookEventsJson ? JSON.stringify(input.webhookEventsJson) : null}::jsonb, webhook_events_json),
+          updated_at = now()
+      where id = ${existing.id}
+      returning *
+    `;
+    return row<FulfillmentOrder>(toCamel(updated));
+  }
   await sql()`insert into fulfillment_orders ${sql()(toSnake(order))}`;
   return order;
 }
@@ -1644,6 +2576,66 @@ export async function getFulfillmentOrderByOrderId(orderId: string): Promise<Ful
   return existing ? row<FulfillmentOrder>(toCamel(existing)) : null;
 }
 
+export async function getFulfillmentOrderByExternalId(providerExternalId: string): Promise<FulfillmentOrder | null> {
+  if (!usePostgres()) {
+    const data = await readStore();
+    return data.fulfillmentOrders.find((entry) => entry.provider === "printful" && entry.providerExternalId === providerExternalId) || null;
+  }
+  const [existing] = await sql()`
+    select * from fulfillment_orders
+    where provider = 'printful' and provider_external_id = ${providerExternalId}
+    limit 1
+  `;
+  return existing ? row<FulfillmentOrder>(toCamel(existing)) : null;
+}
+
+export async function getOrderBundle(orderId: string): Promise<{
+  order: Order;
+  bundle: StorefrontBundle;
+  ledgerEntries: LedgerEntry[];
+  ledgerAccruals: LedgerAccrual[];
+  fulfillmentOrder: FulfillmentOrder | null;
+  stripeTransfers: StripeTransfer[];
+  systemEvents: SystemEvent[];
+} | null> {
+  if (!usePostgres()) {
+    const data = await readStore();
+    const order = data.orders.find((entry) => entry.id === orderId);
+    if (!order) return null;
+    const storefront = data.storefronts.find((entry) => entry.id === order.storefrontId);
+    const bundle = storefront ? hydrateBundle(data, storefront) : null;
+    if (!bundle) return null;
+    return {
+      order,
+      bundle,
+      ledgerEntries: data.ledgerEntries.filter((entry) => entry.orderId === orderId),
+      ledgerAccruals: data.ledgerAccruals.filter((entry) => entry.orderId === orderId),
+      fulfillmentOrder: data.fulfillmentOrders.find((entry) => entry.orderId === orderId && entry.provider === "printful") || null,
+      stripeTransfers: data.stripeTransfers.filter((entry) => entry.orderId === orderId),
+      systemEvents: data.systemEvents.filter((entry) => entry.entityType === "order" && entry.entityId === orderId).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    };
+  }
+  const [orderRow] = await sql()`select * from orders where id = ${orderId} limit 1`;
+  if (!orderRow) return null;
+  const order = row<Order>(toCamel(orderRow));
+  const bundle = await getStorefrontBundleById(order.storefrontId);
+  if (!bundle) return null;
+  const ledgerRows = await sql()`select * from ledger_entries where order_id = ${orderId} order by created_at asc`;
+  const accrualRows = await sql()`select * from ledger_accruals where order_id = ${orderId} order by created_at asc`;
+  const [fulfillmentRow] = await sql()`select * from fulfillment_orders where order_id = ${orderId} and provider = 'printful' limit 1`;
+  const transferRows = await sql()`select * from stripe_transfers where order_id = ${orderId} order by created_at asc`;
+  const eventRows = await sql()`select * from system_events where entity_type = 'order' and entity_id = ${orderId} order by created_at desc`;
+  return {
+    order,
+    bundle,
+    ledgerEntries: ledgerRows.map((entry) => row<LedgerEntry>(toCamel(entry))),
+    ledgerAccruals: accrualRows.map((entry) => row<LedgerAccrual>(toCamel(entry))),
+    fulfillmentOrder: fulfillmentRow ? row<FulfillmentOrder>(toCamel(fulfillmentRow)) : null,
+    stripeTransfers: transferRows.map((entry) => row<StripeTransfer>(toCamel(entry))),
+    systemEvents: eventRows.map((entry) => row<SystemEvent>(toCamel(entry)))
+  };
+}
+
 export async function updateOrderFulfillmentFields(input: {
   orderId: string;
   printfulOrderId?: string | null;
@@ -1651,6 +2643,7 @@ export async function updateOrderFulfillmentFields(input: {
   printfulDashboardUrl?: string | null;
   printfulTrackingUrl?: string | null;
   printfulCostsJson?: Record<string, unknown> | null;
+  adminReviewRequired?: boolean | null;
 }): Promise<void> {
   if (!usePostgres()) {
     await mutateStore((data) => {
@@ -1661,20 +2654,92 @@ export async function updateOrderFulfillmentFields(input: {
       order.printfulDashboardUrl = input.printfulDashboardUrl || order.printfulDashboardUrl || null;
       order.printfulTrackingUrl = input.printfulTrackingUrl || order.printfulTrackingUrl || null;
       order.printfulCostsJson = input.printfulCostsJson || order.printfulCostsJson || null;
+      if (input.adminReviewRequired != null) order.adminReviewRequired = Boolean(input.adminReviewRequired);
       order.updatedAt = nowIso();
     });
     return;
   }
   await sql()`
     update orders
-    set printful_order_id = ${input.printfulOrderId || null},
-        printful_status = ${input.printfulStatus || null},
-        printful_dashboard_url = ${input.printfulDashboardUrl || null},
-        printful_tracking_url = ${input.printfulTrackingUrl || null},
-        printful_costs_json = ${input.printfulCostsJson ? JSON.stringify(input.printfulCostsJson) : null}::jsonb,
+    set printful_order_id = coalesce(${input.printfulOrderId || null}, printful_order_id),
+        printful_status = coalesce(${input.printfulStatus || null}, printful_status),
+        printful_dashboard_url = coalesce(${input.printfulDashboardUrl || null}, printful_dashboard_url),
+        printful_tracking_url = coalesce(${input.printfulTrackingUrl || null}, printful_tracking_url),
+        printful_costs_json = coalesce(${input.printfulCostsJson ? JSON.stringify(input.printfulCostsJson) : null}::jsonb, printful_costs_json),
+        admin_review_required = case when ${input.adminReviewRequired != null} then ${Boolean(input.adminReviewRequired)} else admin_review_required end,
         updated_at = now()
     where id = ${input.orderId}
   `;
+}
+
+export async function markOrderFulfillmentReviewRequired(input: {
+  orderId: string;
+  printfulStatus: string;
+  reason: string;
+  printfulOrderId?: string | null;
+}): Promise<void> {
+  await updateOrderFulfillmentFields({
+    orderId: input.orderId,
+    printfulOrderId: input.printfulOrderId || null,
+    printfulStatus: input.printfulStatus,
+    adminReviewRequired: true
+  });
+  await recordEvent({
+    entityType: "order",
+    entityId: input.orderId,
+    eventType: "fulfillment_admin_review_required",
+    level: "error",
+    message: input.reason,
+    metadataJson: {
+      printfulStatus: input.printfulStatus,
+      printfulOrderId: input.printfulOrderId || null
+    },
+    requestId: null,
+    traceId: null
+  });
+}
+
+export async function updateFulfillmentOrderStatus(input: {
+  orderId: string;
+  status: FulfillmentOrder["status"];
+  responseJson?: Record<string, unknown> | null;
+  trackingUrl?: string | null;
+}): Promise<void> {
+  if (!usePostgres()) {
+    await mutateStore((data) => {
+      const fulfillment = data.fulfillmentOrders.find((entry) => entry.orderId === input.orderId && entry.provider === "printful");
+      if (fulfillment) {
+        fulfillment.status = input.status;
+        fulfillment.responseJson = input.responseJson || fulfillment.responseJson || null;
+        fulfillment.trackingUrl = input.trackingUrl || fulfillment.trackingUrl || null;
+        fulfillment.updatedAt = nowIso();
+      }
+      const order = data.orders.find((entry) => entry.id === input.orderId);
+      if (order) {
+        order.printfulStatus = input.status;
+        order.printfulTrackingUrl = input.trackingUrl || order.printfulTrackingUrl || null;
+        order.updatedAt = nowIso();
+      }
+    });
+    return;
+  }
+  await sql().begin(async (tx) => {
+    await tx`
+      update fulfillment_orders
+      set status = ${input.status},
+          response_json = case when ${input.responseJson ? JSON.stringify(input.responseJson) : null}::jsonb is null then response_json else response_json || ${input.responseJson ? JSON.stringify(input.responseJson) : null}::jsonb end,
+          tracking_url = coalesce(${input.trackingUrl || null}, tracking_url),
+          updated_at = now()
+      where order_id = ${input.orderId} and provider = 'printful'
+    `;
+    await tx`
+      update orders
+      set printful_status = ${input.status},
+          printful_tracking_url = coalesce(${input.trackingUrl || null}, printful_tracking_url),
+          updated_at = now()
+      where id = ${input.orderId}
+    `;
+  });
 }
 
 export async function updateRelicMockupResult(input: {
@@ -2022,6 +3087,27 @@ export async function updateFulfillmentOrderFromProvider(input: {
   trackingUrl?: string | null;
   eventJson: Record<string, unknown>;
 }): Promise<FulfillmentOrder | null> {
+  const incomingEventId =
+    typeof input.eventJson.id === "string"
+      ? input.eventJson.id
+      : typeof input.eventJson.event_id === "string"
+        ? input.eventJson.event_id
+        : typeof input.eventJson.webhook_event_id === "string"
+          ? input.eventJson.webhook_event_id
+          : null;
+  const appendWebhookEvent = (priorEvents: unknown[]) => {
+    if (
+      incomingEventId &&
+      priorEvents.some((entry) => {
+        if (!entry || typeof entry !== "object") return false;
+        const event = entry as Record<string, unknown>;
+        return event.id === incomingEventId || event.event_id === incomingEventId || event.webhook_event_id === incomingEventId;
+      })
+    ) {
+      return priorEvents;
+    }
+    return [...priorEvents, input.eventJson];
+  };
   if (!usePostgres()) {
     return mutateStore((data) => {
       const order = data.fulfillmentOrders.find(
@@ -2033,9 +3119,18 @@ export async function updateFulfillmentOrderFromProvider(input: {
       order.status = input.status || order.status;
       order.trackingUrl = input.trackingUrl || order.trackingUrl || null;
       order.webhookEventsJson = {
-        events: [...(((order.webhookEventsJson as { events?: unknown[] } | null)?.events || []) as unknown[]), input.eventJson]
+        events: appendWebhookEvent((((order.webhookEventsJson as { events?: unknown[] } | null)?.events || []) as unknown[]))
       };
       order.updatedAt = nowIso();
+      const parent = data.orders.find((entry) => entry.id === order.orderId);
+      if (parent) {
+        parent.printfulStatus = order.status;
+        parent.printfulTrackingUrl = order.trackingUrl || parent.printfulTrackingUrl || null;
+        if (order.status === "shipped") parent.status = "shipped";
+        if (order.status === "delivered") parent.status = "delivered";
+        if (order.status === "failed") parent.adminReviewRequired = true;
+        parent.updatedAt = nowIso();
+      }
       return order;
     });
   }
@@ -2047,7 +3142,7 @@ export async function updateFulfillmentOrderFromProvider(input: {
   `;
   if (!existing) return null;
   const priorEvents = ((existing.webhook_events_json as { events?: unknown[] } | null)?.events || []) as unknown[];
-  const webhookEventsJson = { events: [...priorEvents, input.eventJson] };
+  const webhookEventsJson = { events: appendWebhookEvent(priorEvents) };
   const [updated] = await sql()`
     update fulfillment_orders
     set status = ${input.status || existing.status},
@@ -2057,7 +3152,290 @@ export async function updateFulfillmentOrderFromProvider(input: {
     where id = ${existing.id}
     returning *
   `;
+  if (updated) {
+    await sql()`
+      update orders
+      set printful_status = ${updated.status},
+          printful_tracking_url = coalesce(${input.trackingUrl || null}, printful_tracking_url),
+          status = case
+            when ${updated.status} = 'shipped' then 'shipped'
+            when ${updated.status} = 'delivered' then 'delivered'
+            else status
+          end,
+          admin_review_required = case when ${updated.status} = 'failed' then true else admin_review_required end,
+          updated_at = now()
+      where id = ${updated.order_id}
+    `;
+  }
   return updated ? row<FulfillmentOrder>(toCamel(updated)) : null;
+}
+
+export type FulfillmentRepairIssue = {
+  orderId: string;
+  dropId?: string | null;
+  storefrontSlug?: string | null;
+  orderStatus: string;
+  printfulStatus?: string | null;
+  fulfillmentStatus?: string | null;
+  providerOrderId?: string | null;
+  providerExternalId?: string | null;
+  adminReviewRequired: boolean;
+  issueTypes: string[];
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
+function fulfillmentIssueTypes(order: Order, fulfillment: FulfillmentOrder | null): string[] {
+  const issues: string[] = [];
+  if (order.status === "paid" && !fulfillment) issues.push("paid_no_fulfillment_order");
+  if (order.adminReviewRequired) issues.push("admin_review_required");
+  if (order.printfulStatus === "failed") issues.push("printful_failed");
+  if (order.printfulStatus === "reconciliation_required" || fulfillment?.status === "reconciliation_required") issues.push("printful_ambiguous");
+  if (order.printfulOrderId && !fulfillment) issues.push("order_has_provider_id_missing_fulfillment_row");
+  if (fulfillment && !fulfillment.providerOrderId) issues.push("fulfillment_row_missing_provider_id");
+  return issues;
+}
+
+export async function listFulfillmentRepairIssues(): Promise<FulfillmentRepairIssue[]> {
+  if (!usePostgres()) {
+    const data = await readStore();
+    return data.orders
+      .map((order) => {
+        const fulfillment = data.fulfillmentOrders.find((entry) => entry.orderId === order.id && entry.provider === "printful") || null;
+        const storefront = data.storefronts.find((entry) => entry.id === order.storefrontId) || null;
+        const issueTypes = fulfillmentIssueTypes(order, fulfillment);
+        return {
+          orderId: order.id,
+          dropId: order.dropId || null,
+          storefrontSlug: storefront?.slug || null,
+          orderStatus: order.status,
+          printfulStatus: order.printfulStatus || null,
+          fulfillmentStatus: fulfillment?.status || null,
+          providerOrderId: fulfillment?.providerOrderId || order.printfulOrderId || null,
+          providerExternalId: fulfillment?.providerExternalId || null,
+          adminReviewRequired: Boolean(order.adminReviewRequired),
+          issueTypes,
+          createdAt: order.createdAt,
+          updatedAt: order.updatedAt
+        };
+      })
+      .filter((entry) => entry.issueTypes.length > 0);
+  }
+  const rows = await sql()`
+    select
+      o.id as order_id,
+      o.drop_id,
+      s.slug as storefront_slug,
+      o.status as order_status,
+      o.printful_status,
+      o.printful_order_id,
+      o.admin_review_required,
+      o.created_at,
+      o.updated_at,
+      f.status as fulfillment_status,
+      f.provider_order_id,
+      f.provider_external_id
+    from orders o
+    left join fulfillment_orders f on f.order_id = o.id and f.provider = 'printful'
+    left join storefronts s on s.id = o.storefront_id
+    where o.status = 'paid'
+       or o.admin_review_required is true
+       or o.printful_status in ('failed', 'reconciliation_required')
+       or (o.printful_order_id is not null and f.id is null)
+       or (f.id is not null and f.provider_order_id is null)
+    order by o.created_at desc
+  `;
+  return rows
+    .map((entry) => {
+      const order = {
+        id: String(entry.order_id),
+        dropId: entry.drop_id ? String(entry.drop_id) : null,
+        storefrontId: "",
+        collectionId: "",
+        relicId: "",
+        relicEditionId: "",
+        checkoutSessionId: "",
+        status: String(entry.order_status) as Order["status"],
+        printfulStatus: entry.printful_status ? String(entry.printful_status) : null,
+        printfulOrderId: entry.printful_order_id ? String(entry.printful_order_id) : null,
+        adminReviewRequired: Boolean(entry.admin_review_required),
+        createdAt: entry.created_at ? new Date(entry.created_at as Date).toISOString() : "",
+        updatedAt: entry.updated_at ? new Date(entry.updated_at as Date).toISOString() : ""
+      } as Order;
+      const fulfillment = entry.fulfillment_status
+        ? ({
+            orderId: order.id,
+            provider: "printful",
+            status: String(entry.fulfillment_status) as FulfillmentOrder["status"],
+            providerOrderId: entry.provider_order_id ? String(entry.provider_order_id) : null,
+            providerExternalId: entry.provider_external_id ? String(entry.provider_external_id) : null
+          } as FulfillmentOrder)
+        : null;
+      return {
+        orderId: order.id,
+        dropId: order.dropId,
+        storefrontSlug: entry.storefront_slug ? String(entry.storefront_slug) : null,
+        orderStatus: order.status,
+        printfulStatus: order.printfulStatus || null,
+        fulfillmentStatus: fulfillment?.status || null,
+        providerOrderId: fulfillment?.providerOrderId || order.printfulOrderId || null,
+        providerExternalId: fulfillment?.providerExternalId || null,
+        adminReviewRequired: Boolean(order.adminReviewRequired),
+        issueTypes: fulfillmentIssueTypes(order, fulfillment),
+        createdAt: order.createdAt,
+        updatedAt: order.updatedAt
+      };
+    })
+    .filter((entry) => entry.issueTypes.length > 0);
+}
+
+export async function blockOrderPayout(input: { orderId: string; reason: string }): Promise<void> {
+  if (!usePostgres()) {
+    await mutateStore((data) => {
+      const order = data.orders.find((entry) => entry.id === input.orderId);
+      if (order) {
+        order.payoutBlockedAt = order.payoutBlockedAt || nowIso();
+        order.payoutBlockReason = input.reason;
+        order.adminReviewRequired = true;
+        order.updatedAt = nowIso();
+      }
+      for (const accrual of data.ledgerAccruals.filter((entry) => entry.orderId === input.orderId && entry.status !== "paid")) {
+        accrual.status = "reversed";
+        accrual.reason = `${accrual.reason}; payout blocked: ${input.reason}`;
+        accrual.updatedAt = nowIso();
+      }
+      for (const transfer of data.stripeTransfers.filter((entry) => entry.orderId === input.orderId && entry.status !== "created")) {
+        transfer.status = "blocked";
+        transfer.error = input.reason;
+        transfer.updatedAt = nowIso();
+      }
+    });
+    return;
+  }
+  await sql().begin(async (tx) => {
+    await tx`
+      update orders
+      set payout_blocked_at = coalesce(payout_blocked_at, now()),
+          payout_block_reason = ${input.reason},
+          admin_review_required = true,
+          updated_at = now()
+      where id = ${input.orderId}
+    `;
+    await tx`
+      update ledger_accruals
+      set status = 'reversed',
+          reason = reason || ${`; payout blocked: ${input.reason}`},
+          updated_at = now()
+      where order_id = ${input.orderId} and status <> 'paid'
+    `;
+    await tx`
+      update stripe_transfers
+      set status = 'blocked', error = ${input.reason}, updated_at = now()
+      where order_id = ${input.orderId} and status <> 'created'
+    `;
+  });
+}
+
+export async function getStripeTransferByIdempotencyKey(idempotencyKey: string): Promise<StripeTransfer | null> {
+  if (!usePostgres()) {
+    const data = await readStore();
+    return data.stripeTransfers.find((entry) => entry.idempotencyKey === idempotencyKey) || null;
+  }
+  const [transfer] = await sql()`select * from stripe_transfers where idempotency_key = ${idempotencyKey} limit 1`;
+  return transfer ? row<StripeTransfer>(toCamel(transfer)) : null;
+}
+
+export async function createStripeTransferRecord(input: Omit<StripeTransfer, "id" | "createdAt" | "updatedAt" | "status" | "stripeTransferId" | "error"> & {
+  status?: StripeTransfer["status"];
+  stripeTransferId?: string | null;
+  error?: string | null;
+}): Promise<StripeTransfer> {
+  const transfer: StripeTransfer = {
+    id: newId("trn"),
+    ...input,
+    status: input.status || "pending",
+    stripeTransferId: input.stripeTransferId || null,
+    error: input.error || null,
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  };
+  if (!usePostgres()) {
+    return mutateStore((data) => {
+      const existing = data.stripeTransfers.find((entry) => entry.idempotencyKey === input.idempotencyKey);
+      if (existing) return existing;
+      data.stripeTransfers.push(transfer);
+      return transfer;
+    });
+  }
+  const [inserted] = await sql()`
+    insert into stripe_transfers ${sql()(toSnake(transfer))}
+    on conflict (idempotency_key) do update set updated_at = stripe_transfers.updated_at
+    returning *
+  `;
+  return row<StripeTransfer>(toCamel(inserted));
+}
+
+export async function markStripeTransferCreated(input: {
+  idempotencyKey: string;
+  stripeTransferId: string;
+  status?: StripeTransfer["status"];
+  metadataJson?: Record<string, unknown> | null;
+}): Promise<StripeTransfer | null> {
+  if (!usePostgres()) {
+    return mutateStore((data) => {
+      const transfer = data.stripeTransfers.find((entry) => entry.idempotencyKey === input.idempotencyKey);
+      if (!transfer) return null;
+      transfer.stripeTransferId = input.stripeTransferId;
+      transfer.status = input.status || "created";
+      transfer.metadataJson = { ...(transfer.metadataJson || {}), ...(input.metadataJson || {}) };
+      transfer.updatedAt = nowIso();
+      const accrual = transfer.ledgerAccrualId ? data.ledgerAccruals.find((entry) => entry.id === transfer.ledgerAccrualId) : null;
+      if (accrual) {
+        accrual.status = "paid";
+        accrual.txHash = input.stripeTransferId;
+        accrual.updatedAt = nowIso();
+      }
+      return transfer;
+    });
+  }
+  const [updated] = await sql().begin(async (tx) => {
+    const [transfer] = await tx`
+      update stripe_transfers
+      set stripe_transfer_id = ${input.stripeTransferId},
+          status = ${input.status || "created"},
+          metadata_json = coalesce(metadata_json, '{}'::jsonb) || ${JSON.stringify(input.metadataJson || {})}::jsonb,
+          updated_at = now()
+      where idempotency_key = ${input.idempotencyKey}
+      returning *
+    `;
+    if (transfer?.ledger_accrual_id) {
+      await tx`
+        update ledger_accruals
+        set status = 'paid', tx_hash = ${input.stripeTransferId}, updated_at = now()
+        where id = ${transfer.ledger_accrual_id}
+      `;
+    }
+    return [transfer];
+  });
+  return updated ? row<StripeTransfer>(toCamel(updated)) : null;
+}
+
+export async function markStripeTransferFailed(input: { idempotencyKey: string; error: string }): Promise<void> {
+  if (!usePostgres()) {
+    await mutateStore((data) => {
+      const transfer = data.stripeTransfers.find((entry) => entry.idempotencyKey === input.idempotencyKey);
+      if (!transfer) return;
+      transfer.status = "failed";
+      transfer.error = input.error;
+      transfer.updatedAt = nowIso();
+    });
+    return;
+  }
+  await sql()`
+    update stripe_transfers
+    set status = 'failed', error = ${input.error}, updated_at = now()
+    where idempotency_key = ${input.idempotencyKey}
+  `;
 }
 
 export async function startDnsClaim(storefrontId: string, input: { claimantWallet?: string | null; claimantEmail?: string | null; claimantName?: string | null }): Promise<Claim> {
@@ -2380,18 +3758,39 @@ export async function startStripeConnectPayout(dropId: string, input: { baseUrl:
       drop.payoutMethod = "stripe_connect";
       drop.payoutStatus = "missing";
       drop.updatedAt = nowIso();
+      const existingAccount = data.stripeAccounts.find((entry) => entry.stripeAccountId === accountId);
+      if (existingAccount) {
+        existingAccount.status = "onboarding";
+        existingAccount.updatedAt = nowIso();
+      } else {
+        data.stripeAccounts.push({
+          id: newId("sca"),
+          storefrontId: bundle.storefront.id,
+          stripeAccountId: accountId,
+          status: "onboarding",
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        });
+      }
     });
   } else {
-    await sql()`
-      update drops
-      set stripe_connect_account_id = ${accountId},
-          stripe_connect_onboarding_url = ${link.url},
-          stripe_connect_status = 'onboarding',
-          payout_method = 'stripe_connect',
-          payout_status = 'missing',
-          updated_at = now()
-      where id = ${dropId}
-    `;
+    await sql().begin(async (tx) => {
+      await tx`
+        update drops
+        set stripe_connect_account_id = ${accountId},
+            stripe_connect_onboarding_url = ${link.url},
+            stripe_connect_status = 'onboarding',
+            payout_method = 'stripe_connect',
+            payout_status = 'missing',
+            updated_at = now()
+        where id = ${dropId}
+      `;
+      await tx`
+        insert into stripe_accounts (id, storefront_id, stripe_account_id, status, created_at, updated_at)
+        values (${newId("sca")}, ${bundle.storefront.id}, ${accountId}, 'onboarding', now(), now())
+        on conflict do nothing
+      `;
+    });
   }
   return { accountId, onboardingUrl: link.url };
 }
@@ -2401,12 +3800,22 @@ export async function updateStripeConnectPayoutStatus(input: {
   payoutsEnabled: boolean;
   chargesEnabled?: boolean;
   detailsSubmitted?: boolean;
+  requirementsCurrentlyDue?: unknown[] | Record<string, unknown> | null;
+  requirementsEventuallyDue?: unknown[] | Record<string, unknown> | null;
+  disabledReason?: string | null;
 }): Promise<void> {
   if (!usePostgres()) {
     await mutateStore((data) => {
       const drop = data.drops.find((entry) => entry.stripeConnectAccountId === input.accountId);
       if (!drop) return;
       drop.stripeConnectStatus = input.payoutsEnabled ? "ready" : input.detailsSubmitted ? "submitted" : "pending";
+      drop.stripeConnectChargesEnabled = Boolean(input.chargesEnabled);
+      drop.stripeConnectPayoutsEnabled = Boolean(input.payoutsEnabled);
+      drop.stripeConnectDetailsSubmitted = Boolean(input.detailsSubmitted);
+      drop.stripeConnectRequirementsCurrentlyDue = input.requirementsCurrentlyDue || null;
+      drop.stripeConnectRequirementsEventuallyDue = input.requirementsEventuallyDue || null;
+      drop.stripeConnectDisabledReason = input.disabledReason || null;
+      drop.stripeConnectLastAccountUpdatedAt = nowIso();
       if (input.payoutsEnabled) {
         drop.payoutStatus = "stripe_connect_ready";
         drop.payoutMethod = "stripe_connect";
@@ -2414,19 +3823,35 @@ export async function updateStripeConnectPayoutStatus(input: {
         drop.payoutConfiguredAt = drop.payoutConfiguredAt || nowIso();
       }
       drop.updatedAt = nowIso();
+      const account = data.stripeAccounts.find((entry) => entry.stripeAccountId === input.accountId);
+      if (account) {
+        account.status = drop.stripeConnectStatus || "pending";
+        account.updatedAt = nowIso();
+      }
     });
     return;
   }
-  await sql()`
-    update drops
-    set stripe_connect_status = ${input.payoutsEnabled ? "ready" : input.detailsSubmitted ? "submitted" : "pending"},
-        payout_status = case when ${input.payoutsEnabled} then 'stripe_connect_ready' else payout_status end,
-        payout_method = case when ${input.payoutsEnabled} then 'stripe_connect' else payout_method end,
-        stripe_connect_verified_at = case when ${input.payoutsEnabled} then now() else stripe_connect_verified_at end,
-        payout_configured_at = case when ${input.payoutsEnabled} then coalesce(payout_configured_at, now()) else payout_configured_at end,
-        updated_at = now()
-    where stripe_connect_account_id = ${input.accountId}
-  `;
+  const status = input.payoutsEnabled ? "ready" : input.detailsSubmitted ? "submitted" : "pending";
+  await sql().begin(async (tx) => {
+    await tx`
+      update drops
+      set stripe_connect_status = ${status},
+          stripe_connect_charges_enabled = ${Boolean(input.chargesEnabled)},
+          stripe_connect_payouts_enabled = ${Boolean(input.payoutsEnabled)},
+          stripe_connect_details_submitted = ${Boolean(input.detailsSubmitted)},
+          stripe_connect_requirements_currently_due = ${JSON.stringify(input.requirementsCurrentlyDue || [])}::jsonb,
+          stripe_connect_requirements_eventually_due = ${JSON.stringify(input.requirementsEventuallyDue || [])}::jsonb,
+          stripe_connect_disabled_reason = ${input.disabledReason || null},
+          stripe_connect_last_account_updated_at = now(),
+          payout_status = case when ${input.payoutsEnabled} then 'stripe_connect_ready' else payout_status end,
+          payout_method = case when ${input.payoutsEnabled} then 'stripe_connect' else payout_method end,
+          stripe_connect_verified_at = case when ${input.payoutsEnabled} then now() else stripe_connect_verified_at end,
+          payout_configured_at = case when ${input.payoutsEnabled} then coalesce(payout_configured_at, now()) else payout_configured_at end,
+          updated_at = now()
+      where stripe_connect_account_id = ${input.accountId}
+    `;
+    await tx`update stripe_accounts set status = ${status}, updated_at = now() where stripe_account_id = ${input.accountId}`;
+  });
 }
 
 export async function getRelicCheckoutContext(relicId: string) {

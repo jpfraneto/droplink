@@ -1,12 +1,12 @@
 import Link from "next/link";
 import { publicProductCopy } from "@/lib/publicCopy";
-import { isPublicStorefrontReady, listStorefrontBundles } from "@/lib/store";
+import { isGeneratedStorefrontVisible, listStorefrontBundles } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 export default async function DirectoryPage() {
   const droplinks = (await listStorefrontBundles())
-    .filter((bundle) => isPublicStorefrontReady(bundle))
+    .filter((bundle) => isGeneratedStorefrontVisible(bundle))
     .map((bundle) => ({
       id: bundle.storefront.id,
       slug: bundle.storefront.slug,
@@ -32,10 +32,6 @@ export default async function DirectoryPage() {
           </div>
         </header>
 
-        <div className="directory-heading">
-          <h1>Directory</h1>
-          <p>{droplinks.length ? `${droplinks.length} generated droplinks` : "No generated droplinks yet."}</p>
-        </div>
 
         <div className="directory-list">
           {droplinks.map((item) => (
@@ -45,9 +41,6 @@ export default async function DirectoryPage() {
                 <strong>{item.brandName}</strong>
                 <em>{item.hostname}</em>
                 <span>{item.title}</span>
-                <small>
-                  {item.products.slice(0, 3).join(" | ")} | {item.sold} / {item.total} sold
-                </small>
               </span>
             </Link>
           ))}

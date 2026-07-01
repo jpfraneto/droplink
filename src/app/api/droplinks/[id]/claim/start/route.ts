@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { currentUserFromRequest } from "@/lib/auth";
 import { getDropBundleByDropId, startDnsClaim } from "@/lib/store";
 
 const schema = z.object({
@@ -11,9 +12,16 @@ const schema = z.object({
 export async function POST(request: Request, { params }: { params: { id: string } }) {
   try {
     const body = schema.parse(await request.json());
+    const user = await currentUserFromRequest(request);
+    if (!user) return NextResponse.json({ error: "Login with X to claim this DropLink." }, { status: 401 });
     const bundle = await getDropBundleByDropId(params.id);
     if (!bundle?.drop) return NextResponse.json({ error: "DropLink not found." }, { status: 404 });
-    const claim = await startDnsClaim(bundle.storefront.id, body);
+    const claim = await startDnsClaim(bundle.storefront.id, {
+      ...body,
+      claimantName: body.claimantName || `@${user.username}`,
+      claimantEmail: body.claimantEmail,
+      claimantWallet: body.claimantWallet
+    });
     return NextResponse.json({
       dropId: params.id,
       canonicalRootDomain: bundle.drop.canonicalRootDomain || bundle.drop.canonicalDomain,

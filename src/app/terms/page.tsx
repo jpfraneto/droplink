@@ -1,8 +1,8 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "DropLink Terms and Conditions",
-  description: "Terms and conditions for DropLink by Anky, Inc."
+  title: "DropLink Terms of Service",
+  description: "Terms of Service for DropLink by Anky, Inc."
 };
 
 export default function TermsPage() {
@@ -12,8 +12,8 @@ export default function TermsPage() {
         <Link className="about-agent-link" href="/">
           back to droplink
         </Link>
-        <h1>Terms and Conditions</h1>
-        <p className="muted">Effective June 29, 2026</p>
+        <h1>Terms of Service</h1>
+        <p className="muted">Effective June 30, 2026</p>
 
         <h2>Operator</h2>
         <p>
@@ -35,10 +35,10 @@ export default function TermsPage() {
 
         <h2>Scouting and x402 Payments</h2>
         <p>
-          If a DropLink does not exist for a canonical domain, a user may pay 8 USDC through x402 to scout it. This
-          payment covers computation, product design, and creation of the DropLink preview. Scouting does not transfer
-          ownership of the submitted domain, the brand, or any third-party intellectual property. Scouting does not
-          authorize sales.
+          If a DropLink does not exist for a canonical domain, a logged-in user may pay 8 USDC through x402 or pay
+          through Stripe to scout it. This payment covers computation, product design, and creation of the DropLink
+          preview. Scouting does not transfer ownership of the submitted domain, the brand, or any third-party
+          intellectual property. Scouting does not authorize sales.
         </p>
         <p>
           A third-party scout may be eligible to receive 8% of future revenue from a generated DropLink if the verified
@@ -47,6 +47,14 @@ export default function TermsPage() {
           the owner receives 100% and no scout cut applies. Eligibility, payout timing, and payout availability depend on
           successful domain verification, completed sales, payment processor availability, fraud checks, refunds,
           chargebacks, fulfillment costs, taxes, and applicable law.
+        </p>
+
+        <h2>X Login and Scout Profiles</h2>
+        <p>
+          DropLink uses X login to identify scouts. By logging in with X, you authorize DropLink to use the X account
+          information returned by X, such as your user id, username, display name, and profile image, to create your
+          DropLink account and public scout profile. Your public profile may show your X username, profile image, total
+          scouts, estimated or settled scout earnings, and DropLinks you have scouted.
         </p>
 
         <h2>Domain Ownership and Activation</h2>
@@ -107,6 +115,7 @@ export default function TermsPage() {
         <h2>Contact</h2>
         <p>
           Questions about DropLink may be directed to <a href="https://x.com/jpfraneto" target="_blank" rel="noreferrer">@jpfraneto</a>.
+          Please also review the <Link href="/privacy">Privacy Policy</Link>.
         </p>
       </section>
     </main>

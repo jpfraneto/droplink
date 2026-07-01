@@ -1,0 +1,32 @@
+import { readFileSync, writeFileSync, copyFileSync } from "fs";
+
+const path = "/home/kithkui/.config/droplink/production.env";
+const backup = `${path}.bak-openrouter-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+const updates: Record<string, string> = {
+  IMAGE_PROVIDER: "openrouter",
+  DROPLINK_IMAGE_PROVIDER: "openrouter",
+  OPENROUTER_IMAGE_MODEL: "openai/gpt-image-2",
+  OPENROUTER_IMAGE_ENDPOINT: "https://openrouter.ai/api/v1/chat/completions",
+  DROPLINK_ALLOW_FLUX_IMAGE_PROVIDER: "false",
+  DROPLINK_ALLOW_MANUAL_IMAGE_PROVIDER: "false",
+  DROPLINK_AGENT_RUNTIME: "hermes_cli",
+  DROPLINK_AGENT_SKILL: "droplink",
+  DROPLINK_REQUIRE_AGENTIC_GENERATION: "true",
+  HERMES_AGENT_FALLBACK: "false"
+};
+copyFileSync(path, backup);
+const lines = readFileSync(path, "utf8").split(/\r?\n/);
+const seen = new Set<string>();
+const next = lines.map((line) => {
+  const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
+  if (!match) return line;
+  const key = match[1];
+  if (!(key in updates)) return line;
+  seen.add(key);
+  return `${key}=${updates[key]}`;
+});
+for (const [key, value] of Object.entries(updates)) {
+  if (!seen.has(key)) next.push(`${key}=${value}`);
+}
+writeFileSync(path, next.join("\n"));
+console.log(JSON.stringify({ updated: Object.keys(updates), backup }, null, 2));

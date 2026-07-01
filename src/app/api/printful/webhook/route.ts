@@ -4,18 +4,29 @@ import { recordEvent, updateFulfillmentOrderFromProvider } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
-function verifyOptionalSignature(raw: string, request: Request) {
+function productionWebhookGuardsEnabled() {
+  return process.env.NODE_ENV === "production" || process.env.DROPLINK_PRODUCTION_GUARDS === "true";
+}
+
+function verifySignature(raw: string, request: Request): { ok: boolean; reason?: string } {
   const secret = process.env.PRINTFUL_WEBHOOK_SECRET;
-  if (!secret) return true;
+  if (!secret) {
+    if (productionWebhookGuardsEnabled()) return { ok: false, reason: "PRINTFUL_WEBHOOK_SECRET is required in production." };
+    return { ok: true, reason: "signature_not_configured_dev" };
+  }
   const signature =
     request.headers.get("x-pf-signature") ||
     request.headers.get("x-printful-signature") ||
     request.headers.get("printful-signature");
-  if (!signature) return false;
+  if (!signature) return { ok: false, reason: "Missing Printful signature." };
   const expected = createHmac("sha256", secret).update(raw).digest("hex");
-  const a = Buffer.from(signature.replace(/^sha256=/, ""), "hex");
-  const b = Buffer.from(expected, "hex");
-  return a.length === b.length && timingSafeEqual(a, b);
+  try {
+    const a = Buffer.from(signature.replace(/^sha256=/, ""), "hex");
+    const b = Buffer.from(expected, "hex");
+    return { ok: a.length === b.length && timingSafeEqual(a, b), reason: "Invalid Printful signature." };
+  } catch {
+    return { ok: false, reason: "Invalid Printful signature encoding." };
+  }
 }
 
 function text(input: unknown) {
@@ -24,20 +35,37 @@ function text(input: unknown) {
 
 function statusFromPrintful(eventType: string, status: string | null) {
   const value = `${eventType} ${status || ""}`.toLowerCase();
-  if (/ship|shipment/.test(value)) return "shipped" as const;
   if (/deliver/.test(value)) return "delivered" as const;
-  if (/fail|cancel|hold/.test(value)) return "failed" as const;
-  if (/confirm|pending|inprocess|created|update/.test(value)) return "confirmed" as const;
+  if (/shipment_sent|shipment_shipped|\bship|shipment/.test(value)) return "shipped" as const;
+  if (/fail|cancel|hold|returned/.test(value)) return "failed" as const;
+  if (/order_confirmed|confirm|inprocess|in_process|processing/.test(value)) return "confirmed" as const;
+  if (/order_created|draft/.test(value)) return "draft_created" as const;
   return undefined;
 }
 
 export async function POST(request: Request) {
   const raw = await request.text();
-  if (!verifyOptionalSignature(raw, request)) {
-    return NextResponse.json({ error: "Invalid Printful signature." }, { status: 401 });
+  const signature = verifySignature(raw, request);
+  if (!signature.ok) {
+    await recordEvent({
+      entityType: "printful_webhook",
+      entityId: "signature",
+      eventType: "printful_webhook_rejected",
+      level: "error",
+      message: signature.reason || "Invalid Printful signature.",
+      metadataJson: { production: productionWebhookGuardsEnabled() },
+      requestId: request.headers.get("x-request-id"),
+      traceId: null
+    }).catch(() => null);
+    return NextResponse.json({ error: signature.reason || "Invalid Printful signature." }, { status: signature.reason?.includes("required") ? 500 : 401 });
   }
 
-  const payload = JSON.parse(raw) as Record<string, unknown>;
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON." }, { status: 400 });
+  }
   const eventType = text(payload.type) || "printful_webhook";
   const data = (payload.data || {}) as Record<string, unknown>;
   const order = ((data.order || data) as Record<string, unknown>) || {};

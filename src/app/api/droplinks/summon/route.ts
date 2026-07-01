@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { canonicalizeDropUrl } from "@/lib/dropCanonicalization";
+import { currentUserFromRequest } from "@/lib/auth";
 import { assertFiniteDropConfig } from "@/lib/env";
 import { dropConfig } from "@/lib/env";
 import { enqueueGeneration } from "@/lib/queues";
@@ -10,6 +11,7 @@ import { verifyX402Payment, type VerifiedX402Payment } from "@/lib/x402";
 
 const schema = z.object({
   submittedUrl: z.string().min(3),
+  x402PaymentProof: z.string().trim().min(3).optional(),
   summonerWallet: z.string().optional(),
   creatorDisplayName: z.string().optional()
 });
@@ -39,6 +41,10 @@ export async function POST(request: Request) {
   try {
     assertFiniteDropConfig();
     const body = schema.parse(await request.json());
+    const user = await currentUserFromRequest(request);
+    if (!user) {
+      return NextResponse.json({ error: "Login with X to scout.", authRequired: true }, { status: 401 });
+    }
     const target = canonicalizeDropUrl(body.submittedUrl);
     const existing = await getDropBundleByCanonicalHash(target.rootDomainHash);
     if (existing?.drop) {
@@ -48,7 +54,7 @@ export async function POST(request: Request) {
         submittedHost: target.submittedHost,
         submittedPath: target.submittedPath,
         normalizedUrl: target.sourceUrl,
-        submittedByWallet: body.summonerWallet || null,
+        submittedByWallet: user.username,
         usedForGeneration: false,
         signalMetadataJson: { duplicateRootDomain: true, canonicalRootDomain: target.canonicalRootDomain }
       });
@@ -72,11 +78,12 @@ export async function POST(request: Request) {
     }
     const payment = Number(dropConfig.summonPriceUsdc) <= 0
       ? zeroDollarScoutPayment(request, body)
-      : await verifyX402Payment(request);
+      : await verifyX402Payment(request, body.x402PaymentProof);
     const job = await enqueueGeneration({
       url: target.canonicalUrl,
+      scoutUserId: user.id,
       summonerWallet: payment.payerAddress || body.summonerWallet || null,
-      creatorDisplayName: body.creatorDisplayName || null,
+      creatorDisplayName: `@${user.username}`,
       summonPaymentTxHash: payment.txHash,
       summonPaymentMetadataJson: payment.raw,
       requestId: request.headers.get("x-request-id")

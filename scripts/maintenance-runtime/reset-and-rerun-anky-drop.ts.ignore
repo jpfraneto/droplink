@@ -1,0 +1,53 @@
+import { canonicalizeDropUrl } from "../../src/lib/dropCanonicalization";
+import { enqueueGeneration } from "../../src/lib/queues";
+import { sql, usePostgres } from "../../src/lib/db";
+
+const target = canonicalizeDropUrl("https://anky.app/");
+if (!usePostgres()) throw new Error("DATABASE_URL is not configured; refusing to mutate non-Postgres store.");
+
+const db = sql();
+const existing = await db`
+  select d.id as drop_id, d.storefront_id, s.brand_id, s.slug, s.generation_trace_id
+  from drops d
+  join storefronts s on s.id = d.storefront_id
+  where d.root_domain_hash = ${target.rootDomainHash}
+     or d.domain_hash = ${target.rootDomainHash}
+     or d.canonical_root_domain = ${target.canonicalRootDomain}
+  order by d.created_at desc
+`;
+
+const deleted: unknown[] = [];
+for (const row of existing) {
+  const orders = await db`select id, status from orders where drop_id = ${row.drop_id} limit 10`;
+  if (orders.length) {
+    throw new Error(`Refusing to delete ${row.drop_id}; orders exist: ${JSON.stringify(orders)}`);
+  }
+  const checkoutSessions = await db`select id, status from checkout_sessions where drop_id = ${row.drop_id}`;
+  const storeId = String(row.storefront_id);
+  const brandId = String(row.brand_id);
+
+  await db.begin(async (tx) => {
+    await tx`delete from system_events where entity_id = ${storeId} or entity_id = ${row.drop_id} or trace_id = ${row.generation_trace_id}`;
+    await tx`delete from checkout_sessions where drop_id = ${row.drop_id}`;
+    await tx`delete from storefronts where id = ${storeId}`;
+    await tx`delete from brands where id = ${brandId}`;
+  });
+  deleted.push({ ...row, checkoutSessionsDeleted: checkoutSessions.length });
+}
+
+const job = await enqueueGeneration({
+  url: "https://anky.app/",
+  requestId: "manual-regenerate-anky-nonflux"
+});
+
+console.log(JSON.stringify({
+  target: {
+    canonicalUrl: target.canonicalUrl,
+    canonicalRootDomain: target.canonicalRootDomain,
+    rootDomainHash: target.rootDomainHash
+  },
+  deleted,
+  enqueued: { jobId: job.id, traceId: job.traceId, inputJson: job.inputJson }
+}, null, 2));
+
+process.exit(0);

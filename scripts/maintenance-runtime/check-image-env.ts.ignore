@@ -1,0 +1,18 @@
+const keys = [
+  "DROPLINK_AGENT_RUNTIME",
+  "DROPLINK_AGENT_SKILL",
+  "DROPLINK_REQUIRE_AGENTIC_GENERATION",
+  "DROPLINK_IMAGE_PROVIDER",
+  "IMAGE_PROVIDER",
+  "OPENROUTER_IMAGE_MODEL",
+  "OPENROUTER_IMAGE_ENDPOINT",
+  "OPENAI_IMAGE_MODEL",
+  "DROPLINK_ALLOW_FLUX_IMAGE_PROVIDER",
+  "DROPLINK_ALLOW_MANUAL_IMAGE_PROVIDER",
+  "HERMES_AGENT_FALLBACK"
+];
+const out: Record<string, string | boolean | undefined> = {};
+for (const key of keys) out[key] = process.env[key];
+out.OPENROUTER_API_KEY_PRESENT = Boolean(process.env.OPENROUTER_API_KEY);
+out.OPENAI_API_KEY_PRESENT = Boolean(process.env.OPENAI_API_KEY);
+console.log(JSON.stringify(out, null, 2));

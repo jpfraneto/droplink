@@ -1,7 +1,7 @@
 import { dropConfig, pricingConfig } from "./env";
 import type { DropPriceBook, Relic } from "./types";
 
-function centsFromUsd(input: string | number | null | undefined): number {
+export function centsFromUsd(input: string | number | null | undefined): number {
   const value = Number(input || 0);
   return Number.isFinite(value) ? Math.round(value * 100) : 0;
 }
@@ -10,7 +10,7 @@ function usd(cents: number): string {
   return (Math.max(0, cents) / 100).toFixed(2);
 }
 
-function estimatePrintfulCostCents(relic: Relic): number {
+export function estimatePrintfulCostCents(relic: Relic): number {
   const explicit = relic.fulfillmentSpecJson?.estimatedPrintfulCostUsd;
   if (explicit) return centsFromUsd(explicit);
   const haystack = `${relic.productFamily} ${relic.archetype} ${relic.fulfillmentSpecJson?.productName || ""}`.toLowerCase();
@@ -23,7 +23,7 @@ function estimatePrintfulCostCents(relic: Relic): number {
   return 2200;
 }
 
-function estimateStripeFeeCents(unitPriceCents: number): number {
+export function estimateStripeFeeCents(unitPriceCents: number): number {
   return Math.ceil(unitPriceCents * 0.029 + 30);
 }
 

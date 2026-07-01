@@ -19,6 +19,7 @@ export type GenerationQueuePayload = {
   slug?: string;
   dnsClaimNonce?: string;
   summonerWallet?: string | null;
+  scoutUserId?: string | null;
   creatorDisplayName?: string | null;
   summonPaymentTxHash?: string | null;
   summonPaymentMetadataJson?: Record<string, unknown> | null;
@@ -86,6 +87,7 @@ export async function enqueueGeneration(input: {
   url: string;
   requestId?: string | null;
   summonerWallet?: string | null;
+  scoutUserId?: string | null;
   creatorDisplayName?: string | null;
   summonPaymentTxHash?: string | null;
   summonPaymentMetadataJson?: Record<string, unknown> | null;
@@ -135,6 +137,7 @@ export async function enqueueGeneration(input: {
     payoutStatus: "missing",
     payoutMethod: "none",
     publishStatus: "blocked",
+    scoutUserId: input.scoutUserId || null,
     summonerWallet: input.summonerWallet || null,
     creatorDisplayName: input.creatorDisplayName || null,
     summonPaymentTxHash: input.summonPaymentTxHash || null,
@@ -227,6 +230,7 @@ export async function enqueueGeneration(input: {
     slug,
     dnsClaimNonce,
     summonerWallet: input.summonerWallet || null,
+    scoutUserId: input.scoutUserId || null,
     creatorDisplayName: input.creatorDisplayName || null,
     summonPaymentTxHash: input.summonPaymentTxHash || null,
     summonPaymentMetadataJson: input.summonPaymentMetadataJson || null
@@ -300,6 +304,7 @@ async function runInlineDevelopmentGeneration(input: GenerationQueuePayload) {
       slug: input.slug,
       dnsClaimNonce: input.dnsClaimNonce,
       summonerWallet: input.summonerWallet,
+      scoutUserId: input.scoutUserId,
       creatorDisplayName: input.creatorDisplayName,
       summonPaymentTxHash: input.summonPaymentTxHash,
       summonPaymentMetadataJson: input.summonPaymentMetadataJson

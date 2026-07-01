@@ -30,9 +30,21 @@ export const storefronts = pgTable("storefronts", {
   ...timestamps
 });
 
+export const appUsers = pgTable("app_users", {
+  id: varchar("id", { length: 64 }).primaryKey(),
+  xId: varchar("x_id", { length: 128 }).notNull().unique(),
+  username: varchar("username", { length: 64 }).notNull().unique(),
+  displayName: text("display_name").notNull(),
+  avatarUrl: text("avatar_url"),
+  profileUrl: text("profile_url").notNull(),
+  lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+  ...timestamps
+});
+
 export const drops = pgTable("drops", {
   id: varchar("id", { length: 64 }).primaryKey(),
   storefrontId: varchar("storefront_id", { length: 64 }).notNull().references(() => storefronts.id, { onDelete: "cascade" }),
+  scoutUserId: varchar("scout_user_id", { length: 64 }).references(() => appUsers.id, { onDelete: "set null" }),
   originalSubmittedUrl: text("original_submitted_url").notNull(),
   submittedHost: varchar("submitted_host", { length: 255 }),
   submittedPath: text("submitted_path"),
@@ -75,8 +87,17 @@ export const drops = pgTable("drops", {
   stripeConnectAccountId: text("stripe_connect_account_id"),
   stripeConnectStatus: varchar("stripe_connect_status", { length: 64 }),
   stripeConnectOnboardingUrl: text("stripe_connect_onboarding_url"),
+  stripeConnectChargesEnabled: boolean("stripe_connect_charges_enabled").notNull().default(false),
+  stripeConnectPayoutsEnabled: boolean("stripe_connect_payouts_enabled").notNull().default(false),
+  stripeConnectDetailsSubmitted: boolean("stripe_connect_details_submitted").notNull().default(false),
+  stripeConnectRequirementsCurrentlyDue: jsonb("stripe_connect_requirements_currently_due"),
+  stripeConnectRequirementsEventuallyDue: jsonb("stripe_connect_requirements_eventually_due"),
+  stripeConnectDisabledReason: text("stripe_connect_disabled_reason"),
+  stripeConnectLastAccountUpdatedAt: timestamp("stripe_connect_last_account_updated_at", { withTimezone: true }),
   stripeConnectVerifiedAt: timestamp("stripe_connect_verified_at", { withTimezone: true }),
   payoutConfiguredAt: timestamp("payout_configured_at", { withTimezone: true }),
+  checkoutPaused: boolean("checkout_paused").notNull().default(false),
+  checkoutPauseReason: text("checkout_pause_reason"),
   priceBookJson: jsonb("price_book_json"),
   projectedEconomicsJson: jsonb("projected_economics_json"),
   priceBookLockedAt: timestamp("price_book_locked_at", { withTimezone: true }),
@@ -259,7 +280,10 @@ export const orders = pgTable("orders", {
   id: varchar("id", { length: 64 }).primaryKey(),
   checkoutSessionId: varchar("checkout_session_id", { length: 64 }).notNull().references(() => checkoutSessions.id, { onDelete: "restrict" }),
   dropId: varchar("drop_id", { length: 64 }).references(() => drops.id, { onDelete: "cascade" }),
+  stripeSessionId: text("stripe_session_id"),
   stripePaymentIntentId: text("stripe_payment_intent_id"),
+  stripeChargeId: text("stripe_charge_id"),
+  stripeRefundId: text("stripe_refund_id"),
   storefrontId: varchar("storefront_id", { length: 64 }).notNull().references(() => storefronts.id, { onDelete: "cascade" }),
   collectionId: varchar("collection_id", { length: 64 }).notNull().references(() => collections.id, { onDelete: "cascade" }),
   relicId: varchar("relic_id", { length: 64 }).notNull().references(() => relics.id, { onDelete: "restrict" }),
@@ -287,6 +311,8 @@ export const orders = pgTable("orders", {
   economicsStatus: varchar("economics_status", { length: 32 }).notNull().default("estimated"),
   priceBookId: varchar("price_book_id", { length: 64 }),
   adminReviewRequired: boolean("admin_review_required").notNull().default(false),
+  payoutBlockedAt: timestamp("payout_blocked_at", { withTimezone: true }),
+  payoutBlockReason: text("payout_block_reason"),
   onchainReceiptTxHash: text("onchain_receipt_tx_hash"),
   ...timestamps
 });
@@ -345,6 +371,42 @@ export const dropNotifications = pgTable("drop_notifications", {
   ...timestamps
 });
 
+export const scoutCheckoutSessions = pgTable("scout_checkout_sessions", {
+  id: varchar("id", { length: 64 }).primaryKey(),
+  stripeSessionId: text("stripe_session_id").notNull().unique(),
+  submittedUrl: text("submitted_url").notNull(),
+  canonicalUrl: text("canonical_url").notNull(),
+  canonicalRootDomain: varchar("canonical_root_domain", { length: 255 }).notNull(),
+  rootDomainHash: varchar("root_domain_hash", { length: 128 }).notNull(),
+  slug: varchar("slug", { length: 120 }).notNull(),
+  scoutUserId: varchar("scout_user_id", { length: 64 }).references(() => appUsers.id, { onDelete: "set null" }),
+  scoutUsername: varchar("scout_username", { length: 64 }),
+  summonerWallet: text("summoner_wallet"),
+  creatorDisplayName: text("creator_display_name"),
+  amountTotal: integer("amount_total"),
+  currency: varchar("currency", { length: 8 }),
+  status: varchar("status", { length: 32 }).notNull().default("created"),
+  generationJobId: varchar("generation_job_id", { length: 64 }),
+  dropId: varchar("drop_id", { length: 64 }).references(() => drops.id, { onDelete: "set null" }),
+  error: text("error"),
+  metadataJson: jsonb("metadata_json"),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  ...timestamps
+});
+
+export const stripeEvents = pgTable("stripe_events", {
+  id: text("id").primaryKey(),
+  type: varchar("type", { length: 128 }).notNull(),
+  livemode: boolean("livemode").notNull().default(false),
+  stripeCreatedAt: timestamp("stripe_created_at", { withTimezone: true }),
+  status: varchar("status", { length: 32 }).notNull().default("processing"),
+  error: text("error"),
+  metadataJson: jsonb("metadata_json"),
+  processedAt: timestamp("processed_at", { withTimezone: true }),
+  ...timestamps
+});
+
 export const fulfillmentOrders = pgTable("fulfillment_orders", {
   id: varchar("id", { length: 64 }).primaryKey(),
   orderId: varchar("order_id", { length: 64 }).notNull().references(() => orders.id, { onDelete: "cascade" }),
@@ -373,6 +435,29 @@ export const stripeAccounts = pgTable("stripe_accounts", {
   storefrontId: varchar("storefront_id", { length: 64 }).notNull().references(() => storefronts.id, { onDelete: "cascade" }),
   stripeAccountId: text("stripe_account_id").notNull(),
   status: varchar("status", { length: 32 }).notNull().default("pending"),
+  ...timestamps
+});
+
+export const appSettings = pgTable("app_settings", {
+  key: varchar("key", { length: 120 }).primaryKey(),
+  valueJson: jsonb("value_json").notNull(),
+  ...timestamps
+});
+
+export const stripeTransfers = pgTable("stripe_transfers", {
+  id: varchar("id", { length: 64 }).primaryKey(),
+  orderId: varchar("order_id", { length: 64 }).notNull().references(() => orders.id, { onDelete: "cascade" }),
+  ledgerAccrualId: varchar("ledger_accrual_id", { length: 64 }).references(() => ledgerAccruals.id, { onDelete: "set null" }),
+  beneficiaryType: varchar("beneficiary_type", { length: 32 }).notNull(),
+  stripeAccountId: text("stripe_account_id").notNull(),
+  stripeTransferId: text("stripe_transfer_id"),
+  amountCents: integer("amount_cents").notNull(),
+  currency: varchar("currency", { length: 3 }).notNull().default("usd"),
+  status: varchar("status", { length: 32 }).notNull().default("pending"),
+  transferGroup: text("transfer_group").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
+  metadataJson: jsonb("metadata_json"),
+  error: text("error"),
   ...timestamps
 });
 

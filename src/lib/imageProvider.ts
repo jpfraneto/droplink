@@ -1,6 +1,6 @@
 import { randomInt, randomUUID } from "crypto";
 
-type ImageProvider = "openai" | "comfyui" | "flux" | "manual" | "chatgpt" | "chatgpt_manual" | "mock";
+type ImageProvider = "openrouter" | "openai" | "comfyui" | "flux" | "manual" | "chatgpt" | "chatgpt_manual" | "mock";
 
 type GeneratedImage = {
   buffer: Buffer;
@@ -16,18 +16,110 @@ export function openAIImageGenerationBody(prompt: string) {
   };
 }
 
+function safeDefaultImageProvider(): ImageProvider {
+  // Production DropLink must be fully agentic: prompt -> OpenRouter image model -> R2 -> product.
+  // Do not silently fall back to Flux/ComfyUI or manual placeholder assets.
+  return "openrouter";
+}
+
 export function imageProviderMode() {
-  return ((process.env.DROPLINK_IMAGE_PROVIDER || process.env.IMAGE_PROVIDER || "comfyui").toLowerCase() || "comfyui") as ImageProvider;
+  const configured = (process.env.DROPLINK_IMAGE_PROVIDER || process.env.IMAGE_PROVIDER || "").trim().toLowerCase();
+  if (["comfyui", "flux"].includes(configured) && process.env.DROPLINK_ALLOW_FLUX_IMAGE_PROVIDER !== "true") {
+    return safeDefaultImageProvider();
+  }
+  if (["manual", "chatgpt", "chatgpt_manual", "mock"].includes(configured) && process.env.DROPLINK_ALLOW_MANUAL_IMAGE_PROVIDER !== "true") {
+    return safeDefaultImageProvider();
+  }
+  if (configured) return configured as ImageProvider;
+  return safeDefaultImageProvider();
 }
 
 export function manualImageMode() {
   return ["manual", "chatgpt", "chatgpt_manual"].includes(imageProviderMode());
 }
 
+async function bufferFromImageReference(reference: unknown): Promise<Buffer | null> {
+  if (!reference || typeof reference !== "string") return null;
+  if (reference.startsWith("data:image/")) {
+    const base64 = reference.split(",", 2)[1];
+    return base64 ? Buffer.from(base64, "base64") : null;
+  }
+  if (/^https?:\/\//i.test(reference)) {
+    const image = await fetch(reference, { signal: AbortSignal.timeout(120_000) });
+    if (!image.ok) throw new Error(`Image URL fetch returned ${image.status}: ${await image.text()}`);
+    return Buffer.from(await image.arrayBuffer());
+  }
+  return Buffer.from(reference, "base64");
+}
+
+async function imageBufferFromOpenRouterJson(json: any): Promise<Buffer | null> {
+  const candidates: unknown[] = [];
+  for (const item of json?.data || []) {
+    if (item?.b64_json) candidates.push(item.b64_json);
+    if (item?.url) candidates.push(item.url);
+  }
+  const message = json?.choices?.[0]?.message;
+  if (message?.images) {
+    for (const image of message.images) {
+      candidates.push(image?.image_url?.url || image?.url || image?.b64_json);
+    }
+  }
+  if (Array.isArray(message?.content)) {
+    for (const part of message.content) {
+      candidates.push(part?.image_url?.url || part?.url || part?.b64_json);
+    }
+  }
+  for (const candidate of candidates) {
+    const buffer = await bufferFromImageReference(candidate);
+    if (buffer?.length) return buffer;
+  }
+  return null;
+}
+
+export async function generateOpenRouterProductImage(prompt: string): Promise<Buffer | null> {
+  if (imageProviderMode() !== "openrouter") return null;
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENROUTER_API_KEY is required because DropLink image generation is locked to OpenRouter.");
+  }
+  const model = process.env.OPENROUTER_IMAGE_MODEL || process.env.OPENAI_IMAGE_MODEL || "openai/gpt-image-2";
+  const endpoint = (process.env.OPENROUTER_IMAGE_ENDPOINT || "https://openrouter.ai/api/v1/chat/completions").replace(/\/$/, "");
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`,
+      "HTTP-Referer": process.env.DROPLINK_PUBLIC_BASE_URL || process.env.APP_URL || "https://droplink.lat",
+      "X-Title": "DropLink"
+    },
+    body: JSON.stringify({
+      model,
+      modalities: ["image", "text"],
+      messages: [
+        {
+          role: "user",
+          content: prompt
+        }
+      ]
+    }),
+    signal: AbortSignal.timeout(Number(process.env.OPENROUTER_IMAGE_TIMEOUT_MS || 420_000))
+  });
+  if (!response.ok) {
+    throw new Error(`OpenRouter image generation returned ${response.status}: ${await response.text()}`);
+  }
+  const json = await response.json();
+  const buffer = await imageBufferFromOpenRouterJson(json);
+  if (!buffer) throw new Error(`OpenRouter image generation returned no image for model ${model}.`);
+  return buffer;
+}
+
 export async function generateOpenAIProductImage(prompt: string): Promise<Buffer | null> {
   const provider = imageProviderMode();
-  if (provider !== "openai" || !process.env.OPENAI_API_KEY) {
+  if (provider !== "openai") {
     return null;
+  }
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is required because DROPLINK_IMAGE_PROVIDER=openai.");
   }
 
   try {
@@ -45,12 +137,7 @@ export async function generateOpenAIProductImage(prompt: string): Promise<Buffer
     }
 
     const json = (await response.json()) as { data?: Array<{ b64_json?: string; url?: string }> };
-    const item = json.data?.[0];
-    if (item?.b64_json) return Buffer.from(item.b64_json, "base64");
-    if (item?.url) {
-      const image = await fetch(item.url);
-      if (image.ok) return Buffer.from(await image.arrayBuffer());
-    }
+    return imageBufferFromOpenRouterJson(json);
   } catch (error) {
     if (process.env.NODE_ENV === "production") throw error;
   }
@@ -206,6 +293,10 @@ export async function generateImage(prompt: string, options: { width?: number; h
   const provider = imageProviderMode();
   const width = options.width || Number(process.env.COMFYUI_WIDTH || 1024);
   const height = options.height || Number(process.env.COMFYUI_HEIGHT || 1024);
+  if (provider === "openrouter") {
+    const buffer = await generateOpenRouterProductImage(prompt);
+    return buffer ? { buffer, provider: "openrouter" } : null;
+  }
   if (provider === "openai") {
     const buffer = await generateOpenAIProductImage(prompt);
     return buffer ? { buffer, provider: "openai" } : null;

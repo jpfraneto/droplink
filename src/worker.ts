@@ -36,6 +36,7 @@ const worker = new Worker<GenerationQueuePayload>(
       slug: input.slug,
       dnsClaimNonce: input.dnsClaimNonce,
       summonerWallet: input.summonerWallet,
+      scoutUserId: input.scoutUserId,
       creatorDisplayName: input.creatorDisplayName,
       summonPaymentTxHash: input.summonPaymentTxHash,
       summonPaymentMetadataJson: input.summonPaymentMetadataJson

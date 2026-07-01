@@ -13,6 +13,11 @@ type LookupPayload = {
   error?: string;
 };
 
+type LandingUser = {
+  username: string;
+  avatarUrl: string | null;
+} | null;
+
 function validUrl(value: string) {
   try {
     const parsed = new URL(value.includes("://") ? value : `https://${value}`);
@@ -22,7 +27,7 @@ function validUrl(value: string) {
   }
 }
 
-export function LandingFlow() {
+export function LandingFlow({ user }: { user: LandingUser }) {
   const router = useRouter();
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -58,9 +63,20 @@ export function LandingFlow() {
       <div className="phone-screen landing-screen">
         <header className="mobile-nav">
           <strong>DropLink</strong>
-          <a className="mobile-directory-link" href="/directory">
-            Directory
-          </a>
+          <nav className="mobile-nav-actions" aria-label="Primary">
+            <a className="mobile-directory-link" href="/directory">
+              Directory
+            </a>
+            {user ? (
+              <a className="avatar-action" href={`/u/${user.username}`} aria-label={`Open @${user.username} profile`}>
+                {user.avatarUrl ? <img src={user.avatarUrl} alt="" /> : <span aria-hidden="true" />}
+              </a>
+            ) : (
+              <a className="avatar-action" href="/api/auth/x/login?returnTo=/" aria-label="Login with X">
+                <span aria-hidden="true" />
+              </a>
+            )}
+          </nav>
         </header>
 
         <section className="landing-hero" aria-label="Summon a droplink">
@@ -77,7 +93,7 @@ export function LandingFlow() {
               autoCorrect="off"
             />
             <button type="submit" disabled={!canSubmit || loading}>
-              {loading ? "Reading the link" : "Summon the drop"}
+              {loading ? "Reading the link" : `Scout  ${url}`}
             </button>
           </form>
           {error ? <p className="landing-error">{error}</p> : null}
@@ -86,38 +102,37 @@ export function LandingFlow() {
         <section className="landing-preview" aria-label="Example droplink preview">
           <div className="landing-domain-divider">
             <span />
-            <strong>amazon.com</strong>
+            <strong>nousresearch.com</strong>
             <span />
           </div>
           <div className="landing-elements">
-            <article>
-              <h2>Wear</h2>
-              <div>
-                <img src="/landing/amazon-wear.png" alt="Amazon sweatshirt example" />
-              </div>
-            </article>
-            <article>
-              <h2>Display</h2>
-              <div>
-                <img src="/landing/amazon-display.png" alt="Amazon framed print example" />
-              </div>
-            </article>
-            <article>
-              <h2>Use</h2>
-              <div>
-                <img src="/landing/amazon-use.png" alt="Prime mug example" />
-              </div>
-            </article>
+            <a href="/nousresearchcom?item=wear" aria-label="Open Hermes Operator Crewneck details">
+              <article>
+                <h2>Wear</h2>
+                <div>
+                  <img src="https://assets.droplink.lat/collections/col_dd8422937585060cf8/relics/relic_91571cf4b68aee4e18/mockup-wear.png" alt="Nous Research crewneck example" />
+                </div>
+              </article>
+            </a>
+            <a href="/nousresearchcom?item=display" aria-label="Open Nous Commons Model Card details">
+              <article>
+                <h2>Display</h2>
+                <div>
+                  <img src="https://assets.droplink.lat/collections/col_dd8422937585060cf8/relics/relic_5f6948fea4bb2172e3/mockup-display.png" alt="Nous Research model card example" />
+                </div>
+              </article>
+            </a>
+            <a href="/nousresearchcom?item=use" aria-label="Open Atropos Trajectory Journal details">
+              <article>
+                <h2>Use</h2>
+                <div>
+                  <img src="https://assets.droplink.lat/collections/col_dd8422937585060cf8/relics/relic_9ae47e46838060d272/mockup-use.png" alt="Nous Research journal example" />
+                </div>
+              </article>
+            </a>
           </div>
         </section>
       </div>
-      <footer className="landing-footer">
-        <a href="/terms">terms and conditions</a>
-        <a href="/about">about</a>
-        <a href="https://x.com/jpfraneto" target="_blank" rel="noreferrer">
-          by @jpfraneto
-        </a>
-      </footer>
     </main>
   );
 }

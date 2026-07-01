@@ -1,0 +1,17 @@
+import { canonicalizeDropUrl } from "../src/lib/dropCanonicalization";
+import { sql, usePostgres } from "../src/lib/db";
+
+const target = canonicalizeDropUrl("https://anky.app/");
+if (!usePostgres()) throw new Error("DATABASE_URL is not configured; refusing to reset non-Postgres store.");
+
+const db = sql();
+const drops = await db`
+  select d.id as drop_id, d.storefront_id, d.status as drop_status, s.slug, s.status as storefront_status, s.generation_trace_id
+  from drops d
+  join storefronts s on s.id = d.storefront_id
+  where d.root_domain_hash = ${target.rootDomainHash} or d.domain_hash = ${target.rootDomainHash} or d.canonical_root_domain = ${target.canonicalRootDomain}
+  order by d.created_at desc
+`;
+
+console.log(JSON.stringify({ target, drops }, null, 2));
+await sql({ end: true });

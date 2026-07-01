@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { printfulCatalogImageUrl } from "@/lib/printfulReferences";
-import type { Asset, GenerationJob, StorefrontBundle, SystemEvent } from "@/lib/types";
+import type { Asset, GenerationJob, ProductValidationResult, StorefrontBundle, SystemEvent } from "@/lib/types";
 
 type ReferenceImage = {
   url: string;
@@ -15,7 +15,7 @@ type LivePayload = {
   job: GenerationJob | null;
   traceId: string | null;
   bundle: StorefrontBundle | null;
-  readiness: { ready: boolean; blockers: string[]; checklist: Record<string, boolean> } | null;
+  readiness: { ready: boolean; blockers: string[]; checklist: Record<string, boolean>; validation?: ProductValidationResult } | null;
   events: SystemEvent[];
   error?: string;
 };
@@ -192,6 +192,14 @@ function ogReady(bundle: StorefrontBundle | null) {
   return Boolean(bundle?.ogImage?.status === "ready");
 }
 
+function productSlot(relic: StorefrontBundle["relics"][number]) {
+  return relic.fulfillmentSpecJson?.universalSlot || "inferred";
+}
+
+function productVessel(relic: StorefrontBundle["relics"][number]) {
+  return `${relic.fulfillmentSpecJson?.productName || relic.productFamily}${relic.fulfillmentSpecJson?.variantName ? ` / ${relic.fulfillmentSpecJson.variantName}` : ""}`;
+}
+
 function nextAction(payload: LivePayload | null) {
   if (!payload) return { title: "Loading pipeline", body: "Fetching the current generation state." };
   if (payload.error) return { title: "Admin state failed", body: payload.error };
@@ -358,6 +366,7 @@ export function AdminDropWorkflow({
       ) : null}
 
       {bundle?.drop ? <PromptAuditSection bundle={bundle} /> : null}
+      {bundle && payload?.readiness?.validation ? <ValidationSection validation={payload.readiness.validation} /> : null}
       {bundle?.drop ? <ManualImageSection bundle={bundle} /> : null}
 
       {bundle ? (
@@ -394,6 +403,32 @@ export function AdminDropWorkflow({
         </div>
       </section>
     </div>
+  );
+}
+
+function ValidationSection({ validation }: { validation: ProductValidationResult }) {
+  const errors = validation.blocking_errors || [];
+  const warnings = validation.warnings || [];
+  return (
+    <section className="admin-panel">
+      <div className="admin-actions">
+        <div>
+          <h2>Concept-vessel validation</h2>
+          <p className="muted">
+            {validation.mode} · {errors.length ? "blocking errors must be fixed before publish" : warnings.length ? "warnings are reviewable" : "valid"}
+          </p>
+        </div>
+      </div>
+      <div className="workflow-blockers">
+        {errors.map((entry, index) => (
+          <span className="error" key={`${entry.code}-${entry.relicId || index}`}>{entry.message}</span>
+        ))}
+        {warnings.map((entry, index) => (
+          <span className="warning-note" key={`${entry.code}-${entry.relicId || index}`}>{entry.message}</span>
+        ))}
+        {!errors.length && !warnings.length ? <strong>valid</strong> : null}
+      </div>
+    </section>
   );
 }
 
@@ -533,6 +568,14 @@ function ManualImageSection({ bundle }: { bundle: StorefrontBundle }) {
               </div>
               <div className="concept-summary">
                 <div>
+                  <span>Slot</span>
+                  <strong>{productSlot(relic)}</strong>
+                </div>
+                <div>
+                  <span>Vessel</span>
+                  <p>{productVessel(relic)}</p>
+                </div>
+                <div>
                   <span>Title</span>
                   <strong>{relic.name}</strong>
                 </div>
@@ -640,6 +683,16 @@ function CompletedImagesSection({ bundle }: { bundle: StorefrontBundle }) {
           return (
             <div className="manual-image-card" key={relic.id}>
               <strong>{relic.relicIndex}. {relic.name}</strong>
+              <div className="concept-summary">
+                <div>
+                  <span>Slot</span>
+                  <strong>{productSlot(relic)}</strong>
+                </div>
+                <div>
+                  <span>Vessel</span>
+                  <p>{productVessel(relic)}</p>
+                </div>
+              </div>
               <div className="uploaded-image-pair">
                 {assetValid(preview) ? (
                   <div>
@@ -710,7 +763,8 @@ function humanBlocker(blocker: string) {
     assetsStoredOnR2: "assets are not stored on R2",
     noMockAssets: "mock/pending assets remain",
     noMockCopy: "AI/manual provider config is not production-ready",
-    priceBookExists: "price book missing"
+    priceBookExists: "price book missing",
+    productValidationPassed: "concept-vessel validation has blocking errors"
   };
   return labels[blocker] || blocker;
 }

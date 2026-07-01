@@ -1,11 +1,16 @@
+import { execFile as execFileCallback } from "child_process";
 import { createHash } from "crypto";
+import { promisify } from "util";
 import { z } from "zod";
+import { droplinkDoctrineBlock, DROPLINK_DOCTRINE_VERSION } from "./droplinkDoctrine";
 import { loggedExternalCall } from "./logger";
 import type { BrandDiscoveryDossier, BrandStudyJson, RelicPlanJson } from "./types";
 
-export const BRAND_STUDY_PROMPT_VERSION = "brand-study-agentic-2026-06";
-export const RELIC_PLAN_PROMPT_VERSION = "relic-triptych-print-artwork-2026-06";
-export const RELIC_CRITIQUE_PROMPT_VERSION = "relic-critique-print-artwork-2026-06";
+export const BRAND_STUDY_PROMPT_VERSION = `brand-study-agentic-2026-06+${DROPLINK_DOCTRINE_VERSION}`;
+export const RELIC_PLAN_PROMPT_VERSION = `relic-triptych-vessel-slot-2026-06+${DROPLINK_DOCTRINE_VERSION}`;
+export const RELIC_CRITIQUE_PROMPT_VERSION = `relic-critique-vessel-slot-2026-06+${DROPLINK_DOCTRINE_VERSION}`;
+
+const execFile = promisify(execFileCallback);
 
 type BrandStudyInput = {
   url: string;
@@ -52,6 +57,9 @@ const brandStudySchema = z.object({
   archetype: z.string().min(1),
   invocation: z.string().min(800),
   essence: z.string().min(1),
+  hidden_world: z.string().min(1),
+  buyer_role: z.string().min(1),
+  emotional_contract: z.string().min(1),
   worldview: z.string().min(1),
   emotional_posture: z.string().min(1),
   visual_dna: z.object({
@@ -79,6 +87,8 @@ const relicPlanSchema = z.object({
     z.object({
       name: z.string().min(1),
       archetype: z.string().min(1),
+      universal_slot: z.enum(["WEAR", "DISPLAY", "USE"]),
+      story_role: z.string().min(1),
       role_in_triptych: z.string().min(1),
       physical_archetype: z.enum(["garment", "poster", "tote", "sticker", "hat", "print", "other"]).default("other"),
       product_family: z.string().min(1),
@@ -97,11 +107,11 @@ const relicCritiqueSchema = z.object({
 });
 
 export function validateBrandStudy(input: unknown): BrandStudyJson {
-  return brandStudySchema.parse(input);
+  return brandStudySchema.parse(input) as BrandStudyJson;
 }
 
 export function validateRelicPlan(input: unknown, relicCount: 3 | 8): RelicPlanJson {
-  const parsed = relicPlanSchema.parse(input);
+  const parsed = relicPlanSchema.parse(input) as RelicPlanJson;
   if (parsed.relics.length !== relicCount) {
     throw new Error(`Relic plan must contain exactly ${relicCount} relics.`);
   }
@@ -109,15 +119,17 @@ export function validateRelicPlan(input: unknown, relicCount: 3 | 8): RelicPlanJ
 }
 
 function validateRelicCritique(input: unknown, relicCount: 3 | 8): { critique_text: string; refined_plan: RelicPlanJson } {
-  const parsed = relicCritiqueSchema.parse(input);
+  const parsed = relicCritiqueSchema.parse(input) as { critique_text: string; refined_plan: RelicPlanJson };
   validateRelicPlan(parsed.refined_plan, relicCount);
   return parsed;
 }
 
 function brandStudyPrompt(input: BrandStudyInput) {
   return [
+    droplinkDoctrineBlock(),
+    "",
     "ROLE",
-    "You are Hermes, the DropLink creative agent. Your job is to distill a public brand signal into a living creative source that can later become finite physical relics.",
+    "You are Hermes/Anky, the DropLink creative agent. Your job is to distill a public brand signal into a living creative source that can later become finite physical relics.",
     "",
     "GOAL",
     "Interpret the brand as if it were a character with taste, posture, materials, rituals, and taboos. Make it useful for product creation without inventing private facts or claiming endorsement.",
@@ -127,8 +139,11 @@ function brandStudyPrompt(input: BrandStudyInput) {
     "2. Anchor every brand claim in observed evidence. Separate observed brand signal from imaginative interpretation.",
     "3. Treat discovered social/profile/blog/docs/community links as the brand neighborhood, even if their pages were not fetched yet.",
     "4. Personify the brand in the invocation: 280-420 words, vivid but grounded, no generic startup language.",
-    "5. Extract visual DNA from actual visual evidence first: ranked images, headings, repeated phrases, colors, motifs, screenshots, banners, and layout hints.",
-    "6. Create a drop_narrative_seed that can bind exactly three future relics into one story.",
+    "5. Name the hidden_world: the symbolic world the buyer enters through this URL, grounded in public evidence.",
+    "6. Name the buyer_role: who the buyer becomes by owning/using these objects, not a demographic segment.",
+    "7. Name the emotional_contract: the promise/tension the brand asks the buyer to live with.",
+    "8. Extract visual DNA from actual visual evidence first: ranked images, headings, repeated phrases, colors, motifs, screenshots, banners, and layout hints.",
+    "9. Create a drop_narrative_seed that can bind exactly three future relics into one story.",
     "",
     "CONSTRAINTS",
     "Output only JSON that matches the schema. Think privately before writing final JSON.",
@@ -161,8 +176,10 @@ function relicPlanPrompt(
   catalogOptions: Array<{ key: string; name: string; type: string; placements: string[] }>
 ) {
   return [
+    droplinkDoctrineBlock(),
+    "",
     "ROLE",
-    "You are Hermes, the DropLink creative agent. You turn one living brand study into a finite set of physical brand artifacts.",
+    "You are Hermes/Anky, the DropLink creative agent. You turn one living brand study into a finite set of physical brand artifacts.",
     "",
     "GOAL",
     `Create exactly ${input.relicCount} products for one finite brand collection. They must feel intentionally related, not like unrelated merch ideas.`,
@@ -171,15 +188,21 @@ function relicPlanPrompt(
     "Each relic has exactly 8 physical editions. The complete run ends at 24 objects.",
     "Each relic must be purchasable through the provided Printful catalog options.",
     "Use printful_product_key exactly as provided. Do not invent catalog keys.",
-    "Prefer three different product categories. Avoid repeating hoodies, tees, hats, posters, totes, stickers, or drinkware unless the provided catalog has no viable alternative.",
-    "Each relic needs a distinct role_in_triptych, such as threshold, witness, instrument, banner, vessel, map, oath, or residue.",
+    "HARD PRODUCT TRIAD: exactly one WEAR object, exactly one DISPLAY object, exactly one USE object.",
+    "Every product must have universal_slot: WEAR, DISPLAY, or USE. Secondary roles like threshold, witness, instrument, key, node, lens, etc. are allowed only as story_role.",
+    "WEAR must be a garment/hat category. DISPLAY must be poster/print/canvas/wall art/sticker only if no wall object exists. USE must be tote/bag/mug/bottle/notebook/laptop sleeve or another genuinely usable object.",
+    "Do not create two garments. Do not create two bags. Do not let DISPLAY become apparel. If the brand wants several wearable ideas, choose the strongest one and force the other two into display/use.",
+    "Each relic needs a distinct role_in_triptych that begins with its universal slot, e.g. WEAR / threshold, DISPLAY / witness, USE / instrument.",
+    "You must first respect the actual product vessel from printful_product_key. The artifact concept is not allowed to contradict it. If the vessel is a tee, the object is a tee. If the vessel is a candle, the object is a candle. You may give the object symbolic meaning, but do not rename it into a different physical product.",
+    "For unclaimed domains, avoid official logos, exact slogans, direct marks, or partnership language. Create an abstract brand-native tribute, not official merch.",
+    "Public copy must be compressed and product-like. Internal lore may be poetic; customer-facing names, descriptions, and why_this_exists must be short, physical, and desirable.",
     "Internal words like DropLink, relic, edition, triptych, 1/3, 2/3, 3/3, #1, #2, #3, SKU, and product key must never appear as visible artwork text, product copy, or art_direction text.",
     "",
     "METHOD",
     "1. Re-read the brand invocation and drop_narrative_seed.",
     "2. Define a single drop_concept that binds the three relics emotionally and visually.",
-    "3. Select three product forms that create contrast while sharing the same visual DNA.",
-    "4. Make each relic necessary: it should advance the triptych story and carry a different function in the ritual.",
+    "3. Select three product forms that create contrast while sharing the same visual DNA: one worn on the body, one displayed in space, one used by hand.",
+    "4. Make each relic necessary: it should advance the triptych story and carry a different function in the ritual. The role_in_triptych must begin with WEAR, DISPLAY, or USE.",
     "5. Keep the plan manufacturable as print-on-demand artwork: no impossible materials, electronics, embroidery-only assumptions, or multi-part objects.",
     "6. Write art_direction for the raw printable graphic only. It must describe the standalone artwork that goes onto Printful, not a hoodie/shirt/tote mockup, not a person wearing it, and not an ecommerce product photo.",
     "",
@@ -200,8 +223,10 @@ function relicCritiquePrompt(
   catalogOptions: Array<{ key: string; name: string; type: string; placements: string[] }>
 ) {
   return [
+    droplinkDoctrineBlock(),
+    "",
     "ROLE",
-    "You are Hermes in editor mode: a demanding creative director reviewing your own DropLink relic plan before it goes to image generation and production.",
+    "You are Hermes/Anky in editor mode: a demanding creative director reviewing your own DropLink relic plan before it goes to image generation and production.",
     "",
     "GOAL",
     "Critique and refine the initial plan so the final three relics read as one cohesive triptych, faithful to the living brand, emotionally strong, and practical for Printful fulfillment.",
@@ -212,13 +237,17 @@ function relicCritiquePrompt(
     "3. Emotional strength: would a believer understand why these objects deserve to exist in only 8 editions each?",
     "4. Manufacturability: do the product families and printful_product_key values remain valid catalog choices?",
     "5. Image readiness: is the art_direction concrete enough for high-quality raw print artwork, and does it explicitly avoid product mockups, people, ecommerce scenes, and garment bodies?",
-    "6. Product spread: do the three products avoid boring category repetition, especially duplicate hoodies?",
+    "6. Product spread: is there exactly one WEAR, one DISPLAY, and one USE object? Reject duplicate garments, duplicate bags, and display concepts that became apparel.",
+    "7. Vessel integrity: does every product name, description, why_this_exists, art_direction, and printful_product_key describe the same actual physical vessel?",
     "",
     "REFINEMENT RULES",
     "Return critique_text as a concise editorial note naming what changed and why.",
     "Return refined_plan as the improved complete plan, not a patch.",
     "Keep exactly three relics unless the schema asks otherwise. Preserve valid Printful keys exactly.",
     "Prefer a stronger product-category spread when the catalog allows it. Do not preserve duplicate hoodies just because the first draft chose them.",
+    "Keep universal_slot canonical. Put poetic secondary roles only in story_role and role_in_triptych after the slot.",
+    "For unclaimed domains, remove official-logo, exact-slogan, direct-mark, and partnership language.",
+    "Compress public-facing copy. Keep the magic, but make product names and descriptions clear and physical.",
     "Ensure every refined art_direction describes only a standalone printable design asset. Do not ask image generation for the final product preview at this stage.",
     "Remove any visible-artwork instructions containing DropLink, relic, edition, triptych, 1/3, 2/3, 3/3, #1, #2, #3, SKU, or product key.",
     "Think privately before writing final JSON. Output only JSON that matches the schema.",
@@ -507,6 +536,12 @@ function bridgeModelVersion(body: unknown) {
 }
 
 export async function callHermesForCreativeTask(task: CreativeTask): Promise<CreativeTaskResult> {
+  if (process.env.DROPLINK_AGENT_RUNTIME === "hermes_cli") {
+    return runHermesCliSkillTask(task);
+  }
+  if (process.env.DROPLINK_REQUIRE_AGENTIC_GENERATION !== "false") {
+    throw new Error("DropLink generation requires DROPLINK_AGENT_RUNTIME=hermes_cli so the droplink skill is loaded. Refusing non-agentic fallback.");
+  }
   const mode = process.env.HERMES_MODE || "openai";
   if (mode === "agent") {
     try {
@@ -530,6 +565,36 @@ export async function callHermesForCreativeTask(task: CreativeTask): Promise<Cre
   }
   const result = await runRelicCritique(task.input);
   return { type: "critique_relics", ...result };
+}
+
+async function runHermesCliSkillTask(task: CreativeTask): Promise<CreativeTaskResult> {
+  const request = hermesBridgeRequest(task);
+  const hermesBin = process.env.HERMES_CLI_BIN || "hermes";
+  const timeout = Math.max(30_000, Number(process.env.HERMES_CLI_TIMEOUT_MS || process.env.HERMES_BRIDGE_TIMEOUT_MS || 900_000));
+  const skill = process.env.DROPLINK_AGENT_SKILL || "droplink";
+  return loggedExternalCall(
+    { provider: "hermes_cli", operation: task.type, traceId: task.input.traceId, requestId: task.input.requestId },
+    async () => {
+      const { stdout, stderr } = await execFile(
+        hermesBin,
+        ["--skills", skill, "chat", "-q", request.prompt],
+        {
+          timeout,
+          maxBuffer: Number(process.env.HERMES_CLI_MAX_BUFFER || 2_000_000),
+          cwd: process.cwd(),
+          env: { ...process.env, HERMES_DROPLINK_AGENT_JOB: task.type }
+        }
+      );
+      const output = `${stdout || ""}\n${stderr || ""}`.trim();
+      return parseHermesBridgeResponseOrRepair({
+        task,
+        body: output,
+        bridgeUrl: (process.env.HERMES_BRIDGE_URL || "http://127.0.0.1:8891").replace(/\/$/, ""),
+        bearerToken: process.env.HERMES_BRIDGE_TOKEN || process.env.HERMES_AGENT_TOKEN || "hermes-cli",
+        request
+      });
+    }
+  );
 }
 
 async function runHermesBridgeTask(task: CreativeTask): Promise<CreativeTaskResult> {
@@ -795,6 +860,9 @@ function brandStudyJsonSchema() {
       "archetype",
       "invocation",
       "essence",
+      "hidden_world",
+      "buyer_role",
+      "emotional_contract",
       "worldview",
       "emotional_posture",
       "visual_dna",
@@ -813,6 +881,9 @@ function brandStudyJsonSchema() {
       archetype: { type: "string" },
       invocation: { type: "string" },
       essence: { type: "string" },
+      hidden_world: { type: "string" },
+      buyer_role: { type: "string" },
+      emotional_contract: { type: "string" },
       worldview: { type: "string" },
       emotional_posture: { type: "string" },
       visual_dna: {
@@ -860,6 +931,8 @@ function relicPlanJsonSchema(relicCount: 3 | 8, printfulProductKeys: string[] = 
           required: [
             "name",
             "archetype",
+            "universal_slot",
+            "story_role",
             "role_in_triptych",
             "physical_archetype",
             "product_family",
@@ -872,6 +945,8 @@ function relicPlanJsonSchema(relicCount: 3 | 8, printfulProductKeys: string[] = 
           properties: {
             name: { type: "string" },
             archetype: { type: "string" },
+            universal_slot: { type: "string", enum: ["WEAR", "DISPLAY", "USE"] },
+            story_role: { type: "string" },
             role_in_triptych: { type: "string" },
             physical_archetype: { type: "string", enum: ["garment", "poster", "tote", "sticker", "hat", "print", "other"] },
             product_family: { type: "string" },
@@ -921,6 +996,9 @@ function mockBrandStudy(input: { domain: string; title: string; description: str
       `A finite release for ${brandName} should feel like three objects from the same ceremony: a mark worn on the body, a signal held in the hand, and a witness placed on the wall. Each piece should make the run feel intentional, as if only a few people can hold a physical shard of the brand's current myth before it changes form.`
     ].join(" "),
     essence,
+    hidden_world: `${brandName} opens a compact world where public links become proof-of-belonging objects instead of passing noise.`,
+    buyer_role: "early signal keeper",
+    emotional_contract: "You were here early enough to carry the signal before it became obvious.",
     worldview: `${brandName} believes useful things should feel alive, memorable, and worth sharing.`,
     emotional_posture: "precise, strange, optimistic, and builder-native",
     visual_dna: {
@@ -941,16 +1019,19 @@ function mockBrandStudy(input: { domain: string; title: string; description: str
 }
 
 function mockRelicPlan(study: BrandStudyJson, relicCount: 3, _collectionType: "drop"): RelicPlanJson {
-  const families = ["heavyweight tee", "heavyweight hoodie", "poster", "tote bag", "notebook", "mug", "framed poster", "laptop sleeve"];
-  const archetypes = ["body", "shrine", "wall", "carry", "desk", "drink", "ritual", "tool"];
+  const families = ["heavyweight tee", "tote bag", "poster", "notebook", "mug", "framed poster", "laptop sleeve", "heavyweight hoodie"];
+  const archetypes = ["body", "carry", "wall", "desk", "drink", "display", "tool", "garment"];
   const relics = Array.from({ length: relicCount }, (_, index) => {
     const family = families[index % families.length];
     const archetype = archetypes[index % archetypes.length];
+    const slots = ["WEAR", "USE", "DISPLAY"] as const;
     const roles = ["threshold", "instrument", "witness"];
     return {
       name: index === 0 ? `${study.brand_name} Genesis Signal` : `${study.brand_name} ${archetype[0].toUpperCase()}${archetype.slice(1)} ${index + 1}`,
       archetype,
-      role_in_triptych: roles[index % roles.length],
+      universal_slot: slots[index % slots.length],
+      story_role: roles[index % roles.length],
+      role_in_triptych: `${slots[index % slots.length]} / ${roles[index % roles.length]}`,
       physical_archetype: family.includes("tee") || family.includes("hoodie") ? "garment" : family.includes("poster") ? "poster" : family.includes("tote") ? "tote" : "other",
       product_family: family,
       description: `A limited ${family} carrying the ${study.essence.slice(0, 86)} signal.`,

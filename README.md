@@ -1,8 +1,10 @@
 # DropLink
 
-DropLink turns a public URL into one finite physical merch market for that URL's root domain.
+**LIVE IN PRODUCTION HERE, SUBMIT A LINK: https://droplink.lat**
 
-Anyone can discover a domain and pay to scout it. Only the domain owner can claim it. A claimed and published DropLink sells exactly 24 physical objects: 3 generated products, 8 editions each. When those 24 editions sell, the drop is complete.
+DropLink turns any public URL into a finite physical merch drop for that URL's root domain.
+
+It is built for internet-native merch discovery: anyone can scout a brand, creator, project, or website by pasting a link, but only the verified domain owner can claim and activate commerce. A published DropLink sells exactly 24 physical objects: 3 generated products, 8 editions each. When those 24 editions sell, the drop is complete.
 
 Live app: https://droplink.lat
 
@@ -10,7 +12,31 @@ The short source-of-truth version is [DROPLINK_CORE.md](DROPLINK_CORE.md). This 
 
 ## The Product In One Sentence
 
-Paste a link. DropLink resolves the root domain, generates a 3-product limited drop for that domain, lets the internet scout it, lets the domain owner claim it with DNS, and sells at most 24 physical products after operator review.
+Paste a link. DropLink resolves the root domain, generates a 3-product limited merch drop for that domain, lets the internet scout it, lets the domain owner claim it with DNS, and sells at most 24 physical products after operator review.
+
+## What It Is For
+
+DropLink is a bridge between internet attention and owned commerce.
+
+The product answers a specific problem: a fan, scout, or community member may discover that a domain deserves a merch drop before the owner has built one. DropLink lets that person create the preview and potential upside, while keeping the owner in control. The scout can initiate the drop, but the owner must prove DNS ownership before the drop can become official commerce.
+
+The system is intentionally finite:
+
+- One canonical DropLink per root domain.
+- Three generated products per DropLink.
+- Eight editions per product.
+- Twenty-four sellable physical objects total.
+- DNS ownership required before a domain owner can activate the official drop.
+- Operator review required before checkout opens.
+
+## How The System Works
+
+1. A visitor pastes a public URL into `https://droplink.lat`.
+2. DropLink canonicalizes the URL to its root domain, preventing duplicate drops for different paths or subdomains.
+3. If no DropLink exists, a scout can pay to create one through x402 or Stripe.
+4. A queue worker crawls public signals, generates a brand study, creates three product concepts, matches real Printful products, produces assets, builds prices, creates 24 edition records, and generates social preview media.
+5. The public page exists as a preview until the domain owner proves ownership with a DNS TXT record.
+6. After claim, payout setup, asset readiness, and operator review, the DropLink can be published and each edition can be sold through Stripe Checkout and fulfilled through Printful draft orders.
 
 ## Who Does What
 

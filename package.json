@@ -16,10 +16,15 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
-    "test": "bun test"
+    "test": "bun test",
+    "commerce:readiness": "bun scripts/commerce-readiness.ts",
+    "commerce:stripe-live-readiness": "bun scripts/stripe-live-readiness.ts",
+    "commerce:stripe-events": "bun scripts/stripe-events-readiness.ts",
+    "commerce:fulfillment": "bun scripts/commerce-fulfillment.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1075.0",
+    "@aws-sdk/client-sesv2": "^3.1076.0",
     "bullmq": "^5.79.1",
     "cheerio": "^1.0.0",
     "drizzle-orm": "^0.45.2",

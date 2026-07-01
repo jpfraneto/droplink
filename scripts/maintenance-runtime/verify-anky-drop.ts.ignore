@@ -1,0 +1,66 @@
+import { canonicalizeDropUrl } from "../../src/lib/dropCanonicalization";
+import { sql, usePostgres } from "../../src/lib/db";
+
+const target = canonicalizeDropUrl("https://anky.app/");
+if (!usePostgres()) throw new Error("DATABASE_URL is not configured.");
+const db = sql();
+
+const rows = await db`
+  select
+    d.id as drop_id,
+    d.status as drop_status,
+    s.id as storefront_id,
+    s.slug,
+    s.generation_status,
+    s.generation_trace_id,
+    c.id as collection_id,
+    c.title,
+    r.id as relic_id,
+    r.relic_index,
+    r.name as relic_name,
+    r.product_family,
+    a.type as asset_type,
+    a.validation_status,
+    a.url,
+    a.metadata_json->>'imageProvider' as image_provider,
+    a.metadata_json->>'manualUploadRequired' as manual_upload_required
+  from drops d
+  join storefronts s on s.id = d.storefront_id
+  left join collections c on c.drop_id = d.id
+  left join relics r on r.collection_id = c.id
+  left join assets a on a.relic_id = r.id or a.collection_id = c.id
+  where d.root_domain_hash = ${target.rootDomainHash}
+  order by r.relic_index nulls last, a.type
+`;
+
+const events = await db`
+  select event_type, message, metadata_json->>'imageProvider' as image_provider, created_at
+  from system_events
+  where trace_id = ${rows[0]?.generation_trace_id || ""}
+    and (event_type like '%print%' or event_type like '%worker%' or event_type like '%ready%')
+  order by created_at asc
+`;
+
+const providers = Array.from(new Set(rows.map((r) => r.image_provider).filter(Boolean)));
+const bad = providers.filter((p) => String(p).includes("flux") || String(p).includes("comfy"));
+console.log(JSON.stringify({
+  summary: {
+    rowCount: rows.length,
+    providers,
+    badProviders: bad,
+    traceId: rows[0]?.generation_trace_id,
+    slug: rows[0]?.slug,
+    generationStatus: rows[0]?.generation_status,
+    collectionTitle: rows[0]?.title
+  },
+  products: rows.filter((r) => r.asset_type === "print_file").map((r) => ({
+    relicIndex: r.relic_index,
+    name: r.relic_name,
+    family: r.product_family,
+    provider: r.image_provider,
+    validation: r.validation_status,
+    url: r.url
+  })),
+  events
+}, null, 2));
+process.exit(bad.length ? 2 : 0);

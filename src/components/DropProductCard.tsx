@@ -7,13 +7,15 @@ export function DropProductCard({
   relicId,
   checkoutUrl,
   imageUrl,
+  kindLabel,
   title,
   description,
   price,
   remaining,
   total = 8,
   commerceEnabled = true,
-  onPreviewClick
+  onPreviewClick,
+  onDetailsClick
 }: {
   dropId?: string | null;
   relicId?: string | null;
@@ -27,11 +29,12 @@ export function DropProductCard({
   total?: number;
   commerceEnabled?: boolean;
   onPreviewClick?: () => void;
+  onDetailsClick?: () => void;
 }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const soldOut = remaining <= 0;
-  const canBuy = commerceEnabled && !soldOut && Boolean(checkoutUrl || relicId);
+  const canBuy = commerceEnabled && !soldOut && Boolean(checkoutUrl || (dropId && relicId));
 
   async function checkout() {
     if (!canBuy || loading) return;
@@ -42,8 +45,8 @@ export function DropProductCard({
         window.location.href = checkoutUrl;
         return;
       }
-      const endpoint = dropId ? `/api/droplinks/${dropId}/checkout` : "/api/stripe/checkout";
-      const response = await fetch(endpoint, {
+      if (!dropId || !relicId) throw new Error("Checkout is unavailable for this product.");
+      const response = await fetch(`/api/droplinks/${dropId}/checkout`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ relicId })
@@ -58,8 +61,12 @@ export function DropProductCard({
   }
 
   return (
-    <article className={`simple-product${canBuy ? " can-buy" : ""}${loading ? " is-loading" : ""}`}>
+    <article
+      className={`simple-product${canBuy ? " can-buy" : ""}${loading ? " is-loading" : ""}${onDetailsClick ? " has-details" : ""}`}
+      onClick={onDetailsClick}
+    >
       <div className="simple-product-copy">
+        {kindLabel ? <span className="simple-product-kind">{kindLabel}</span> : null}
         <h2>{title}</h2>
         <p>{description}</p>
         <div className="simple-product-bottom">
@@ -69,13 +76,23 @@ export function DropProductCard({
               <button
                 type="button"
                 disabled={!canBuy || loading}
-                onClick={checkout}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  checkout();
+                }}
                 aria-label={soldOut ? `${title} is sold out` : `Buy ${title} for ${price}`}
               >
                 {soldOut ? "SOLD OUT" : loading ? "RESERVING..." : `BUY ${price}`}
               </button>
             ) : (
-              <button type="button" onClick={onPreviewClick} aria-label={`Get notified when ${title} goes live`}>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onPreviewClick?.();
+                }}
+                aria-label={`Get notified when ${title} goes live`}
+              >
                 BUY {price}
               </button>
             )}

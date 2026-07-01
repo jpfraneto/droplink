@@ -13,6 +13,8 @@ export type PayoutStatus = "missing" | "tempo_wallet_ready" | "stripe_connect_re
 export type PayoutMethod = "none" | "tempo_wallet" | "stripe_connect";
 export type PublishStatus = "blocked" | "ready" | "published";
 export type EconomicsStatus = "estimated" | "settled" | "adjusted" | "disputed";
+export type UniversalSlot = "WEAR" | "DISPLAY" | "USE";
+export type PublicDropMode = "scouted_unclaimed" | "claimed_official";
 export type OrderStatus =
   | "paid"
   | "fulfillment_pending"
@@ -20,6 +22,7 @@ export type OrderStatus =
   | "shipped"
   | "delivered"
   | "refunded"
+  | "disputed"
   | "failed";
 export type LedgerEntryType =
   | "customer_payment"
@@ -65,6 +68,7 @@ export type GenerationStep =
 export type Drop = {
   id: string;
   storefrontId: string;
+  scoutUserId?: string | null;
   originalSubmittedUrl: string;
   submittedHost?: string | null;
   submittedPath?: string | null;
@@ -107,8 +111,17 @@ export type Drop = {
   stripeConnectAccountId?: string | null;
   stripeConnectStatus?: string | null;
   stripeConnectOnboardingUrl?: string | null;
+  stripeConnectChargesEnabled?: boolean | null;
+  stripeConnectPayoutsEnabled?: boolean | null;
+  stripeConnectDetailsSubmitted?: boolean | null;
+  stripeConnectRequirementsCurrentlyDue?: Record<string, unknown> | unknown[] | null;
+  stripeConnectRequirementsEventuallyDue?: Record<string, unknown> | unknown[] | null;
+  stripeConnectDisabledReason?: string | null;
+  stripeConnectLastAccountUpdatedAt?: string | null;
   stripeConnectVerifiedAt?: string | null;
   payoutConfiguredAt?: string | null;
+  checkoutPaused?: boolean | null;
+  checkoutPauseReason?: string | null;
   priceBookJson?: DropPriceBook | null;
   projectedEconomicsJson?: DropProjectedEconomics | null;
   priceBookLockedAt?: string | null;
@@ -118,6 +131,18 @@ export type Drop = {
   readinessJson?: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type AppUser = {
+  id: string;
+  xId: string;
+  username: string;
+  displayName: string;
+  avatarUrl?: string | null;
+  profileUrl: string;
+  createdAt: string;
+  updatedAt: string;
+  lastLoginAt?: string | null;
 };
 
 export type DropSourceSignal = {
@@ -257,6 +282,9 @@ export type BrandStudyJson = {
   archetype: string;
   invocation: string;
   essence: string;
+  hidden_world?: string;
+  buyer_role?: string;
+  emotional_contract?: string;
   worldview: string;
   emotional_posture: string;
   visual_dna: {
@@ -293,6 +321,8 @@ export type RelicPlanJson = {
   relics: Array<{
     name: string;
     archetype: string;
+    universal_slot?: UniversalSlot;
+    story_role?: string;
     role_in_triptych: string;
     physical_archetype?: "garment" | "poster" | "tote" | "sticker" | "hat" | "print" | "other";
     product_family: string;
@@ -308,6 +338,8 @@ export type RelicFulfillmentSpec = {
   provider: "printful";
   catalogProductId: number;
   catalogVariantId: number;
+  universalSlot?: UniversalSlot;
+  storyRole?: string;
   productType: string;
   productCategory?: string;
   productName: string;
@@ -322,6 +354,21 @@ export type RelicFulfillmentSpec = {
   estimatedPrintfulCostUsd?: string;
   selectionReason: string;
   rawPrintfulCatalogSnapshotJson?: unknown;
+};
+
+export type ProductValidationIssue = {
+  relicId?: string | null;
+  relicName?: string | null;
+  code: string;
+  message: string;
+};
+
+export type ProductValidationResult = {
+  status: "valid" | "blocked" | "warning";
+  mode: PublicDropMode;
+  blocking_errors: ProductValidationIssue[];
+  warnings: ProductValidationIssue[];
+  checkedAt: string;
 };
 
 export type RelicPlan = {
@@ -451,11 +498,52 @@ export type CheckoutSession = {
   updatedAt: string;
 };
 
+export type StripeEventRecord = {
+  id: string;
+  type: string;
+  livemode: boolean;
+  stripeCreatedAt?: string | null;
+  status: "processing" | "processed" | "failed";
+  error?: string | null;
+  metadataJson?: Record<string, unknown> | null;
+  processedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ScoutCheckoutSession = {
+  id: string;
+  stripeSessionId: string;
+  submittedUrl: string;
+  canonicalUrl: string;
+  canonicalRootDomain: string;
+  rootDomainHash: string;
+  slug: string;
+  scoutUserId?: string | null;
+  scoutUsername?: string | null;
+  summonerWallet?: string | null;
+  creatorDisplayName?: string | null;
+  amountTotal?: number | null;
+  currency?: string | null;
+  status: "created" | "completed" | "expired" | "duplicate" | "failed";
+  generationJobId?: string | null;
+  dropId?: string | null;
+  error?: string | null;
+  metadataJson?: Record<string, unknown> | null;
+  completedAt?: string | null;
+  expiresAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type Order = {
   id: string;
   checkoutSessionId: string;
   dropId?: string | null;
+  stripeSessionId?: string | null;
   stripePaymentIntentId?: string | null;
+  stripeChargeId?: string | null;
+  stripeRefundId?: string | null;
   storefrontId: string;
   collectionId: string;
   relicId: string;
@@ -483,6 +571,8 @@ export type Order = {
   economicsStatus?: EconomicsStatus | null;
   priceBookId?: string | null;
   adminReviewRequired?: boolean | null;
+  payoutBlockedAt?: string | null;
+  payoutBlockReason?: string | null;
   onchainReceiptTxHash?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -533,7 +623,7 @@ export type FulfillmentOrder = {
   provider: "printful";
   providerOrderId?: string | null;
   providerExternalId?: string | null;
-  status: "draft_created" | "confirmed" | "shipped" | "delivered" | "failed";
+  status: "draft_created" | "confirmed" | "shipped" | "delivered" | "failed" | "reconciliation_required";
   requestJson?: Record<string, unknown> | null;
   responseJson?: Record<string, unknown> | null;
   dashboardUrl?: string | null;
@@ -581,6 +671,31 @@ export type StripeAccount = {
   updatedAt: string;
 };
 
+export type AppSetting = {
+  key: string;
+  valueJson: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type StripeTransfer = {
+  id: string;
+  orderId: string;
+  ledgerAccrualId?: string | null;
+  beneficiaryType: "domain_owner" | "creator" | "protocol" | "other";
+  stripeAccountId: string;
+  stripeTransferId?: string | null;
+  amountCents: number;
+  currency: string;
+  status: "pending" | "eligible" | "created" | "failed" | "reversed" | "blocked";
+  transferGroup: string;
+  idempotencyKey: string;
+  metadataJson?: Record<string, unknown> | null;
+  error?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type AdminReview = {
   id: string;
   storefrontId: string;
@@ -608,6 +723,7 @@ export type GenerationJob = {
 
 export type StorefrontBundle = {
   drop: Drop | null;
+  scoutUser: AppUser | null;
   sourceSignals: DropSourceSignal[];
   brand: Brand;
   storefront: Storefront;
@@ -626,6 +742,7 @@ export type StorefrontBundle = {
 };
 
 export type StoreData = {
+  users: AppUser[];
   drops: Drop[];
   dropSourceSignals: DropSourceSignal[];
   brands: Brand[];
@@ -642,10 +759,14 @@ export type StoreData = {
   claims: Claim[];
   dropNotifications: DropNotification[];
   checkoutSessions: CheckoutSession[];
+  scoutCheckoutSessions: ScoutCheckoutSession[];
+  stripeEvents: StripeEventRecord[];
   orders: Order[];
   ledgerEntries: LedgerEntry[];
   fulfillmentOrders: FulfillmentOrder[];
   stripeAccounts: StripeAccount[];
+  appSettings: AppSetting[];
+  stripeTransfers: StripeTransfer[];
   ledgerAccruals: LedgerAccrual[];
   adminReviews: AdminReview[];
   generationJobs: GenerationJob[];

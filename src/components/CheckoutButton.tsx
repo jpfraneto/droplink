@@ -3,10 +3,12 @@
 import { useState } from "react";
 
 export function CheckoutButton({
+  dropId,
   relicId,
   label = "BUY NOW",
   className = "btn accent"
 }: {
+  dropId?: string | null;
   relicId: string;
   label?: string;
   className?: string;
@@ -15,10 +17,14 @@ export function CheckoutButton({
   const [error, setError] = useState<string | null>(null);
 
   async function checkout() {
+    if (!dropId) {
+      setError("Checkout is unavailable for this product.");
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/stripe/checkout", {
+      const response = await fetch(`/api/droplinks/${dropId}/checkout`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ relicId })

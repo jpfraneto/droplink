@@ -50,6 +50,34 @@
       "when": 1782488640000,
       "tag": "0006_prompt_model_versions_128",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1782490000000,
+      "tag": "0007_drop_notifications",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1782491200000,
+      "tag": "0008_x_auth_scout_profiles",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1782492400000,
+      "tag": "0009_stripe_idempotency_and_scout_checkouts",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1782493600000,
+      "tag": "0010_money_path_controls",
+      "breakpoints": true
     }
   ]
 }

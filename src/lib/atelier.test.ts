@@ -1,25 +1,44 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { rm } from "fs/promises";
+import { createHmac } from "crypto";
+import { readFile, rm } from "fs/promises";
 import { join } from "path";
+import { POST as printfulWebhookPOST } from "../app/api/printful/webhook/route";
+import { POST as adminPrintfulRetryPOST } from "../app/api/admin/orders/[id]/printful/retry/route";
 import { bestVisualReferences, buildBrandDiscoveryDossier } from "./brandDiscovery";
 import { canonicalizeDropUrl } from "./dropCanonicalization";
 import { parseDroplinkClaimValue, parseDroplinkPayoutValue, txtRecordNonceMatches, txtRecordPayoutMatches } from "./dnsClaim";
 import { calculateWaterfall } from "./economics";
+import { __setFulfillmentTestHooks, confirmExistingPrintfulOrder, ensurePrintfulDraftForOrder } from "./fulfillment";
 import { newId } from "./hashes";
 import { openAIImageGenerationBody } from "./imageProvider";
 import { buildDropPriceBook, priceBookRelicPriceCents } from "./pricing";
+import { validateProducts } from "./productValidation";
 import { buildRelicFulfillmentSpec, choosePrintablePlacement } from "./printful";
 import { withDefaultHttpsScheme } from "./urls";
 import {
   attachStripeSession,
+  beginStripeEventProcessing,
   completeCheckoutSale,
+  createScoutCheckoutSessionRecord,
+  expireStaleCheckoutReservations,
+  getActiveScoutCheckoutByRootDomainHash,
   getDropByCanonicalHash,
+  getOrderBundle,
+  getScoutCheckoutSessionByStripeSessionId,
+  markOrderPaymentFailed,
+  markOrderRefundedOrDisputed,
+  markStripeEventProcessed,
   publishStorefront,
   recordDropSourceSignal,
+  reviewReadiness,
   reserveEditionForRelic,
   saveGeneratedBundle,
+  sendOrderReceiptEmail,
   startDnsClaim,
-  startTempoPayout
+  startTempoPayout,
+  updateScoutCheckoutSessionRecord,
+  withScoutRootDomainLock,
+  verifyCheckoutSessionMatchesReservation
 } from "./store";
 import type {
   AdminReview,
@@ -40,8 +59,11 @@ import type {
 } from "./types";
 
 const testStore = join(process.cwd(), "data", "test-store.json");
+const originalFetch = globalThis.fetch;
 
 beforeEach(async () => {
+  (process.env as Record<string, string | undefined>).NODE_ENV = "test";
+  delete process.env.DROPLINK_PRODUCTION_GUARDS;
   process.env.DATABASE_URL = "";
   process.env.DROPLINK_DATA_FILE = testStore;
   process.env.ALLOW_MOCKS = "false";
@@ -54,6 +76,8 @@ beforeEach(async () => {
   process.env.PRINTFUL_API_BASE = "https://api.printful.com";
   process.env.PRINTFUL_STORE_ID = "123";
   process.env.PRINTFUL_CONFIRM_ORDERS = "false";
+  process.env.PRINTFUL_AUTO_CONFIRM_ORDERS = "false";
+  process.env.PRINTFUL_WEBHOOK_SECRET = "pf_webhook_secret";
   process.env.DROPLINK_SUMMON_PRICE_USDC = "8";
   process.env.DROPLINK_CREATOR_BOUNTY_BPS = "800";
   process.env.DROPLINK_PROTOCOL_FEE_BPS = "0";
@@ -68,6 +92,9 @@ beforeEach(async () => {
   process.env.DROPLINK_MIN_UNIT_MARGIN_USD = "12";
   process.env.DROPLINK_MIN_UNIT_PRICE_USD = "32";
   process.env.DROPLINK_MAX_UNIT_PRICE_USD = "188";
+  process.env.DROPLINK_REQUIRE_GENERATION_KEY = "false";
+  __setFulfillmentTestHooks();
+  globalThis.fetch = originalFetch;
   await rm(testStore, { force: true });
 });
 
@@ -219,6 +246,59 @@ describe("Printful fulfillment metadata", () => {
   });
 });
 
+describe("concept-vessel validation", () => {
+  test("notebook concept on tee creates a blocking error", () => {
+    const result = validateProducts(validationFixture({ name: "The Archive Notebook", description: "A spiral notebook with pages.", vessel: "Youth Classic Tee", slot: "WEAR" }));
+    expect(result.blocking_errors.map((entry) => entry.code)).toContain("notebook_on_apparel");
+  });
+
+  test("hoodie concept on candle creates a blocking error", () => {
+    const result = validateProducts(validationFixture({ name: "Signal Hoodie", description: "A wearable hoodie for cold mornings.", vessel: "Glass Jar Soy Wax Candle", slot: "DISPLAY" }));
+    expect(result.blocking_errors.map((entry) => entry.code)).toContain("apparel_on_non_apparel");
+  });
+
+  test("bag concept on candle creates a blocking error", () => {
+    const result = validateProducts(validationFixture({ name: "Archive Backpack", description: "A carry bag for daily tools.", vessel: "Glass Jar Soy Wax Candle", slot: "DISPLAY" }));
+    expect(result.blocking_errors.map((entry) => entry.code)).toContain("bag_on_wrong_vessel");
+  });
+
+  test("candle concept on candle is valid", () => {
+    const result = validateProducts(validationFixture({ name: "Archive Candle", description: "A soy wax candle for the desk.", vessel: "Glass Jar Soy Wax Candle", slot: "DISPLAY" }));
+    expect(result.blocking_errors).toHaveLength(0);
+  });
+
+  test("tee concept on tee is valid", () => {
+    const result = validateProducts(validationFixture({ name: "Signal Tee", description: "A black tee for focused work.", vessel: "Unisex Heavyweight T-Shirt", slot: "WEAR" }));
+    expect(result.blocking_errors).toHaveLength(0);
+  });
+
+  test("Youth tee for adult/default brand creates a warning", () => {
+    const result = validateProducts(validationFixture({ name: "Signal Tee", description: "A black tee for focused work.", vessel: "Youth Classic Tee", slot: "WEAR" }));
+    expect(result.warnings.map((entry) => entry.code)).toContain("youth_default_brand");
+  });
+
+  test("missing universal slot with unknown vessel creates a blocking error", () => {
+    const result = validateProducts(validationFixture({ name: "Signal Object", description: "A physical object.", vessel: "Mystery Product", slot: undefined }));
+    expect(result.blocking_errors.map((entry) => entry.code)).toContain("universal_slot_missing");
+  });
+
+  test("USE slot on hoodie creates a blocking error", () => {
+    const result = validateProducts(validationFixture({ name: "Signal Hoodie", description: "A hoodie for focused work.", vessel: "Unisex Fleece Hoodie", slot: "USE" }));
+    expect(result.blocking_errors.map((entry) => entry.code)).toContain("universal_slot_vessel_mismatch");
+  });
+
+  test("unclaimed drop using exact logo instruction creates a warning", () => {
+    const result = validateProducts(validationFixture({
+      name: "Signal Tee",
+      description: "A black tee with the exact logo.",
+      vessel: "Unisex Heavyweight T-Shirt",
+      slot: "WEAR",
+      printPrompt: "Place the official slogan and exact logo in the center."
+    }));
+    expect(result.warnings.map((entry) => entry.code)).toContain("unclaimed_direct_mark_language");
+  });
+});
+
 describe("walletless DNS claim", () => {
   test("claim/start does not require a wallet and uses root TXT", async () => {
     const bundle = await createBundle("summoned", "https://mirror.anky.app/start");
@@ -289,6 +369,344 @@ describe("pricing and checkout", () => {
     const bundle = await createBundle("claimed", "https://anky.app");
     await expect(reserveEditionForRelic({ relicId: bundle.relics[0].id })).rejects.toThrow("not available");
   });
+
+  test("Stripe event processing is idempotent and stores terminal status", async () => {
+    const first = await beginStripeEventProcessing({ id: "evt_once", type: "checkout.session.completed", livemode: false, created: 123 });
+    expect(first.shouldProcess).toBe(true);
+    await markStripeEventProcessed("evt_once", { checkoutSessionId: "cs_once" });
+    const duplicate = await beginStripeEventProcessing({ id: "evt_once", type: "checkout.session.completed", livemode: false, created: 123 });
+    expect(duplicate.shouldProcess).toBe(false);
+    expect(duplicate.event?.status).toBe("processed");
+  });
+
+  test("scout checkout records survive before the generation job exists", async () => {
+    const target = canonicalizeDropUrl("https://mirror.anky.app/start");
+    const scout = await createScoutCheckoutSessionRecord({
+      stripeSessionId: "cs_scout",
+      submittedUrl: target.originalSubmittedUrl,
+      canonicalUrl: target.canonicalUrl,
+      canonicalRootDomain: target.canonicalRootDomain,
+      rootDomainHash: target.rootDomainHash,
+      slug: "anky",
+      scoutUserId: "usr_1",
+      scoutUsername: "jp",
+      amountTotal: 800,
+      currency: "usd"
+    });
+    expect(scout.status).toBe("created");
+    const completed = await updateScoutCheckoutSessionRecord("cs_scout", { status: "completed", generationJobId: "job_1", dropId: "drop_1" });
+    expect(completed?.generationJobId).toBe("job_1");
+    const duplicate = await createScoutCheckoutSessionRecord({
+      stripeSessionId: "cs_scout",
+      submittedUrl: target.originalSubmittedUrl,
+      canonicalUrl: target.canonicalUrl,
+      canonicalRootDomain: target.canonicalRootDomain,
+      rootDomainHash: target.rootDomainHash,
+      slug: "anky",
+      amountTotal: 800,
+      currency: "usd"
+    });
+    expect(duplicate.id).toBe(scout.id);
+    expect(duplicate.status).toBe("completed");
+  });
+
+  test("active scout checkout lookup blocks duplicate in-flight root-domain sessions", async () => {
+    const target = canonicalizeDropUrl("https://anky.app");
+    const scout = await createScoutCheckoutSessionRecord({
+      stripeSessionId: "cs_scout_active",
+      submittedUrl: target.originalSubmittedUrl,
+      canonicalUrl: target.canonicalUrl,
+      canonicalRootDomain: target.canonicalRootDomain,
+      rootDomainHash: target.rootDomainHash,
+      slug: "anky",
+      scoutUserId: "usr_1",
+      scoutUsername: "jp",
+      amountTotal: 800,
+      currency: "usd",
+      expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      metadataJson: { provider: "stripe", type: "droplink_scout", environment: "live" }
+    });
+    const active = await getActiveScoutCheckoutByRootDomainHash(target.rootDomainHash);
+    expect(active?.id).toBe(scout.id);
+    expect((await getScoutCheckoutSessionByStripeSessionId(scout.stripeSessionId))?.id).toBe(scout.id);
+    await updateScoutCheckoutSessionRecord(scout.stripeSessionId, { status: "expired" });
+    expect(await getActiveScoutCheckoutByRootDomainHash(target.rootDomainHash)).toBeNull();
+  });
+
+  test("scout root-domain lock executes guarded operation in local store mode", async () => {
+    const target = canonicalizeDropUrl("https://anky.app");
+    const result = await withScoutRootDomainLock(target.rootDomainHash, async () => "locked");
+    expect(result).toBe("locked");
+  });
+
+  test("checkout completion rejects Stripe sessions with wrong amount or currency", async () => {
+    const bundle = await publishStorefront((await createBundle("claimed", "https://anky.app")).storefront.id);
+    const relic = bundle.relics[0];
+    const { checkout } = await reserveEditionForRelic({ relicId: relic.id, editionNumber: 1 });
+    await attachStripeSession(checkout.id, "cs_verify");
+    const lockedPrice = priceBookRelicPriceCents(bundle.drop?.priceBookJson, relic.id);
+    await expect(
+      verifyCheckoutSessionMatchesReservation({ stripeSessionId: "cs_verify", amountTotal: Number(lockedPrice) + 1, currency: relic.currency })
+    ).rejects.toThrow("amount");
+    await expect(
+      verifyCheckoutSessionMatchesReservation({ stripeSessionId: "cs_verify", amountTotal: Number(lockedPrice), currency: "eur" })
+    ).rejects.toThrow("currency");
+    await expect(
+      verifyCheckoutSessionMatchesReservation({ stripeSessionId: "cs_verify", amountTotal: Number(lockedPrice), currency: relic.currency })
+    ).resolves.toBeTrue();
+  });
+
+  test("expired checkout cleanup releases stale reserved editions", async () => {
+    const bundle = await publishStorefront((await createBundle("claimed", "https://anky.app")).storefront.id);
+    const { checkout } = await reserveEditionForRelic({ relicId: bundle.relics[0].id, editionNumber: 1, ttlMs: -1000 });
+    expect(checkout.status).toBe("created");
+    const result = await expireStaleCheckoutReservations();
+    expect(result.expired).toBe(1);
+    const second = await reserveEditionForRelic({ relicId: bundle.relics[0].id, editionNumber: 1 });
+    expect(second.edition.editionNumber).toBe(1);
+  });
+
+  test("payment failures, refunds, and disputes freeze order accruals for admin review", async () => {
+    const bundle = await publishStorefront((await createBundle("claimed", "https://anky.app")).storefront.id);
+    const { checkout } = await reserveEditionForRelic({ relicId: bundle.relics[0].id, editionNumber: 1 });
+    await attachStripeSession(checkout.id, "cs_failed");
+    const failed = await markOrderPaymentFailed({ stripeSessionId: "cs_failed", reason: "card_declined" });
+    expect(failed.status).toBe("expired");
+
+    const { checkout: paidCheckout } = await reserveEditionForRelic({ relicId: bundle.relics[0].id, editionNumber: 2 });
+    await attachStripeSession(paidCheckout.id, "cs_refund");
+    const sale = await completeCheckoutSale({ stripeSessionId: "cs_refund", stripePaymentIntentId: "pi_refund" });
+    const refunded = await markOrderRefundedOrDisputed({ stripePaymentIntentId: "pi_refund", status: "refunded", reason: "requested_by_customer" });
+    expect(refunded?.order.status).toBe("refunded");
+    expect(refunded?.order.adminReviewRequired).toBe(true);
+    expect(refunded?.accruals.every((entry) => entry.status === "reversed")).toBe(true);
+    expect(sale.order.id).toBe(refunded!.order.id);
+  });
+
+  test("order receipt emails are transactional and non-blocking", async () => {
+    process.env.AWS_REGION = "";
+    process.env.RESEND_API_KEY = "";
+    const bundle = await publishStorefront((await createBundle("claimed", "https://anky.app")).storefront.id);
+    const { checkout } = await reserveEditionForRelic({ relicId: bundle.relics[0].id, editionNumber: 1 });
+    await attachStripeSession(checkout.id, "cs_receipt");
+    const sale = await completeCheckoutSale({ stripeSessionId: "cs_receipt", stripePaymentIntentId: "pi_receipt", customerEmail: "buyer@example.com" });
+    const result = await sendOrderReceiptEmail(sale.order.id);
+    expect(result.sent).toBe(false);
+    expect(result.reason).toContain("AWS_REGION");
+  });
+});
+
+function stripeShippingJson() {
+  return {
+    customerDetails: {
+      email: "buyer@example.com",
+      name: "Buyer Example",
+      address: {
+        line1: "123 Test St",
+        city: "Austin",
+        state: "TX",
+        country: "US",
+        postal_code: "78701"
+      }
+    }
+  };
+}
+
+async function createPaidOrderForFulfillment(stripeSessionId = `cs_${Date.now().toString(36)}`) {
+  const bundle = await publishStorefront((await createBundle("claimed", "https://anky.app")).storefront.id);
+  const { checkout } = await reserveEditionForRelic({ relicId: bundle.relics[0].id, editionNumber: 1 });
+  await attachStripeSession(checkout.id, stripeSessionId);
+  const sale = await completeCheckoutSale({
+    stripeSessionId,
+    stripePaymentIntentId: `pi_${stripeSessionId}`,
+    customerEmail: "buyer@example.com",
+    shippingJson: stripeShippingJson()
+  });
+  return sale.order;
+}
+
+function mockPrintfulFetch(input: {
+  externalOrder?: Record<string, unknown> | null;
+  createdOrderId?: string;
+  failUnexpected?: boolean;
+  calls?: string[];
+}) {
+  const calls = input.calls || [];
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const href = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+    const method = init?.method || "GET";
+    calls.push(`${method} ${href}`);
+    if (method === "GET" && /\/v2\/orders\/@/.test(href)) {
+      if (!input.externalOrder) return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+      return Response.json({ data: input.externalOrder });
+    }
+    if (method === "POST" && /\/v2\/orders$/.test(href)) {
+      return Response.json({
+        data: {
+          id: input.createdOrderId || "pf_created",
+          external_id: JSON.parse(String(init?.body || "{}")).external_id,
+          status: "draft",
+          costs: { currency: "USD", total: "24.00" }
+        }
+      });
+    }
+    if (method === "POST" && /\/order-items$/.test(href)) return Response.json({ data: { id: "item_1" } });
+    if (input.failUnexpected) throw new Error(`Unexpected Printful fetch: ${method} ${href}`);
+    return Response.json({ data: {} });
+  }) as typeof fetch;
+  return calls;
+}
+
+describe("Printful draft safety", () => {
+  test("paid order creates one Printful draft", async () => {
+    const order = await createPaidOrderForFulfillment("cs_pf_create");
+    mockPrintfulFetch({ createdOrderId: "pf_one" });
+    const result = await ensurePrintfulDraftForOrder({ orderId: order.id, triggeredBy: "test" });
+    expect(result.status).toBe("created");
+    expect(result.providerOrderId).toBe("pf_one");
+    const detail = await getOrderBundle(order.id);
+    expect(detail?.fulfillmentOrder?.providerOrderId).toBe("pf_one");
+    expect(detail?.fulfillmentOrder?.providerExternalId).toBe(order.id);
+    expect(detail?.order.printfulStatus).toBe("draft_created");
+  });
+
+  test("retrying draft creation returns existing local fulfillment order and does not duplicate", async () => {
+    const order = await createPaidOrderForFulfillment("cs_pf_existing");
+    mockPrintfulFetch({ createdOrderId: "pf_existing" });
+    await ensurePrintfulDraftForOrder({ orderId: order.id, triggeredBy: "test" });
+    globalThis.fetch = (async () => {
+      throw new Error("retry should not call Printful");
+    }) as unknown as typeof fetch;
+    const retry = await ensurePrintfulDraftForOrder({ orderId: order.id, triggeredBy: "test_retry" });
+    expect(retry.status).toBe("existing_internal");
+    expect(retry.providerOrderId).toBe("pf_existing");
+    const detail = await getOrderBundle(order.id);
+    expect(detail?.fulfillmentOrder?.providerOrderId).toBe("pf_existing");
+  });
+
+  test("external Printful lookup repairs local DB instead of creating duplicate draft", async () => {
+    const order = await createPaidOrderForFulfillment("cs_pf_external");
+    const calls = mockPrintfulFetch({
+      externalOrder: { id: "pf_external", external_id: order.id, status: "draft", costs: { total: "30.00", currency: "USD" } },
+      failUnexpected: true
+    });
+    const result = await ensurePrintfulDraftForOrder({ orderId: order.id, triggeredBy: "test_external" });
+    expect(result.status).toBe("existing_external_repaired");
+    expect(result.providerOrderId).toBe("pf_external");
+    expect(calls.some((entry) => entry.startsWith("POST "))).toBe(false);
+    const detail = await getOrderBundle(order.id);
+    expect(detail?.fulfillmentOrder?.providerOrderId).toBe("pf_external");
+    expect(detail?.order.printfulOrderId).toBe("pf_external");
+  });
+
+  test("Printful API success but DB save failure marks ambiguous admin-review state", async () => {
+    const order = await createPaidOrderForFulfillment("cs_pf_ambiguous");
+    mockPrintfulFetch({ createdOrderId: "pf_ambiguous" });
+    __setFulfillmentTestHooks({
+      createFulfillmentOrder: async () => {
+        throw new Error("simulated db save failure");
+      }
+    });
+    const result = await ensurePrintfulDraftForOrder({ orderId: order.id, triggeredBy: "test_failure" });
+    expect(result.status).toBe("ambiguous_external_state");
+    expect(result.providerOrderId).toBe("pf_ambiguous");
+    const detail = await getOrderBundle(order.id);
+    expect(detail?.order.printfulStatus).toBe("reconciliation_required");
+    expect(detail?.order.printfulOrderId).toBe("pf_ambiguous");
+    expect(detail?.order.adminReviewRequired).toBe(true);
+  });
+
+  test("manual retry repairs ambiguous state without duplicate creation and records system events", async () => {
+    const order = await createPaidOrderForFulfillment("cs_pf_manual_retry");
+    mockPrintfulFetch({ createdOrderId: "pf_manual_retry" });
+    __setFulfillmentTestHooks({
+      createFulfillmentOrder: async () => {
+        throw new Error("simulated db save failure");
+      }
+    });
+    await ensurePrintfulDraftForOrder({ orderId: order.id, triggeredBy: "test_failure" });
+    __setFulfillmentTestHooks();
+    process.env.DROPLINK_PRODUCTION_GUARDS = "true";
+    const calls = mockPrintfulFetch({ externalOrder: null });
+    const response = await adminPrintfulRetryPOST(
+      new Request("http://droplink.test/api/admin/orders/order/printful/retry", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-admin-user": "test-admin" },
+        body: JSON.stringify({ force: true, reason: "test duplicate guard" })
+      }),
+      { params: { id: order.id } }
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.status).toBe("existing_order_field_repaired");
+    expect(calls.some((entry) => entry.startsWith("POST "))).toBe(false);
+    const detail = await getOrderBundle(order.id);
+    expect(detail?.systemEvents.some((entry) => entry.eventType === "admin_printful_retry_requested")).toBe(true);
+  });
+
+  test("Printful confirmation remains disabled unless both env flags enable it", async () => {
+    const order = await createPaidOrderForFulfillment("cs_pf_confirm_disabled");
+    mockPrintfulFetch({ createdOrderId: "pf_confirm_disabled" });
+    await ensurePrintfulDraftForOrder({ orderId: order.id, triggeredBy: "test" });
+    await expect(confirmExistingPrintfulOrder({ orderId: order.id })).rejects.toThrow("Printful confirmation is disabled");
+  });
+
+  test("Printful webhook updates fulfillment state and tracking idempotently", async () => {
+    const order = await createPaidOrderForFulfillment("cs_pf_webhook");
+    mockPrintfulFetch({ createdOrderId: "pf_webhook" });
+    await ensurePrintfulDraftForOrder({ orderId: order.id, triggeredBy: "test" });
+    const payload = JSON.stringify({
+      id: "evt_pf_ship",
+      type: "shipment_sent",
+      data: {
+        order: { id: "pf_webhook", external_id: order.id, status: "shipped" },
+        shipment: { tracking_url: "https://tracking.example/123" }
+      }
+    });
+    const signature = createHmac("sha256", String(process.env.PRINTFUL_WEBHOOK_SECRET)).update(payload).digest("hex");
+    const request = () =>
+      new Request("http://droplink.test/api/printful/webhook", {
+        method: "POST",
+        headers: { "x-pf-signature": signature },
+        body: payload
+      });
+    expect((await printfulWebhookPOST(request())).status).toBe(200);
+    expect((await printfulWebhookPOST(request())).status).toBe(200);
+    const detail = await getOrderBundle(order.id);
+    expect(detail?.order.status).toBe("shipped");
+    expect(detail?.order.printfulTrackingUrl).toBe("https://tracking.example/123");
+    const events = (detail?.fulfillmentOrder?.webhookEventsJson as { events?: unknown[] } | null)?.events || [];
+    expect(events).toHaveLength(1);
+  });
+
+  test("invalid Printful webhook signature is rejected in production-like mode", async () => {
+    process.env.DROPLINK_PRODUCTION_GUARDS = "true";
+    process.env.PRINTFUL_WEBHOOK_SECRET = "production_secret";
+    const response = await printfulWebhookPOST(
+      new Request("http://droplink.test/api/printful/webhook", {
+        method: "POST",
+        headers: { "x-pf-signature": "deadbeef" },
+        body: JSON.stringify({ id: "evt_bad", type: "shipment_sent" })
+      })
+    );
+    expect(response.status).toBe(401);
+  });
+
+  test("missing Printful webhook secret creates a production readiness blocker", async () => {
+    process.env.DROPLINK_PRODUCTION_GUARDS = "true";
+    delete process.env.PRINTFUL_WEBHOOK_SECRET;
+    const bundle = await createBundle("claimed", "https://anky.app");
+    const readiness = reviewReadiness(bundle);
+    expect(readiness.blockers).toContain("printfulWebhookSecretConfigured");
+  });
+
+  test("frontend success page does not trigger fulfillment", async () => {
+    const page = await readFile(join(process.cwd(), "src/app/[brandSlug]/page.tsx"), "utf8");
+    const checkoutButton = await readFile(join(process.cwd(), "src/components/CheckoutButton.tsx"), "utf8");
+    expect(page).not.toContain("ensurePrintfulDraftForOrder");
+    expect(checkoutButton).not.toContain("ensurePrintfulDraftForOrder");
+    expect(checkoutButton).toContain("/api/droplinks/");
+  });
 });
 
 describe("projected vs settled economics", () => {
@@ -328,6 +746,136 @@ describe("projected vs settled economics", () => {
     expect(waterfall.adminReviewRequired).toBe(true);
   });
 });
+
+function validationFixture(input: {
+  name: string;
+  description: string;
+  vessel: string;
+  slot?: "WEAR" | "DISPLAY" | "USE";
+  printPrompt?: string;
+}) {
+  const now = new Date().toISOString();
+  const relic: Relic = {
+    id: "relic_validation",
+    collectionId: "col_validation",
+    dropId: "drop_validation",
+    relicIndex: 1,
+    slug: "validation",
+    name: input.name,
+    archetype: "signal",
+    productFamily: input.vessel,
+    description: input.description,
+    whyThisExists: "A product drop for people who like precise physical objects.",
+    artDirection: "Centered mark.",
+    printfulProductId: "1",
+    printfulVariantId: "2",
+    fulfillmentSpecJson: {
+      provider: "printful",
+      catalogProductId: 1,
+      catalogVariantId: 2,
+      universalSlot: input.slot,
+      storyRole: "test",
+      productType: input.vessel,
+      productName: input.vessel,
+      variantName: "Black / M",
+      placement: "front",
+      technique: "dtg",
+      printFileUrl: "https://assets.droplink.test/file.png",
+      printFileSha256: "sha",
+      retailPriceUsd: "52.00",
+      selectionReason: "test"
+    },
+    unitPriceUsd: "52.00",
+    priceBookId: null,
+    priceLockedAt: null,
+    priceCents: 5200,
+    currency: "usd",
+    totalSupply: 8,
+    soldCount: 0,
+    reservedCount: 0,
+    status: "draft",
+    createdAt: now,
+    updatedAt: now
+  };
+  const assets: Asset[] = [
+    {
+      id: "asset_validation_print",
+      collectionId: relic.collectionId,
+      relicId: relic.id,
+      type: "print_file",
+      url: "https://assets.droplink.test/file.png",
+      storageProvider: "r2",
+      width: 900,
+      height: 900,
+      checksum: "sha",
+      prompt: input.printPrompt || "Create raw artwork.",
+      validationStatus: "valid",
+      metadataJson: {},
+      createdAt: now
+    },
+    {
+      id: "asset_validation_lifestyle",
+      collectionId: relic.collectionId,
+      relicId: relic.id,
+      type: "lifestyle",
+      url: "https://assets.droplink.test/lifestyle.png",
+      storageProvider: "r2",
+      width: 1200,
+      height: 1200,
+      checksum: "sha-life",
+      prompt: input.vessel.toLowerCase().includes("shirt") || input.vessel.toLowerCase().includes("tee") || input.vessel.toLowerCase().includes("hoodie")
+        ? "Show one real person wearing the product naturally."
+        : "Show the product naturally in a believable setting.",
+      validationStatus: "valid",
+      metadataJson: {},
+      createdAt: now
+    }
+  ];
+  return {
+    brand: {
+      id: "brand_validation",
+      canonicalUrl: "https://adult.example/",
+      hostname: "adult.example",
+      slug: "adult-example",
+      name: "Adult Example",
+      createdAt: now,
+      updatedAt: now
+    },
+    drop: {
+      id: "drop_validation",
+      storefrontId: "store_validation",
+      originalSubmittedUrl: "https://adult.example/",
+      canonicalUrl: "https://adult.example/",
+      canonicalDomain: "adult.example",
+      domainHash: "hash",
+      status: "summoned" as const,
+      domainClaimStatus: "unclaimed" as const,
+      publishStatus: "blocked" as const,
+      summonPriceUsdc: "8",
+      creatorBountyBps: 800,
+      protocolFeeBps: 0,
+      totalSupply: 24,
+      relicsPerDrop: 3,
+      editionsPerRelic: 8,
+      createdAt: now,
+      updatedAt: now
+    },
+    storefront: {
+      id: "store_validation",
+      brandId: "brand_validation",
+      slug: "adult-example",
+      status: "summoned" as const,
+      claimStatus: "unclaimed" as const,
+      commerceMode: "preview" as const,
+      commissionBps: 0,
+      generationStatus: "READY_FOR_REVIEW" as const,
+      createdAt: now,
+      updatedAt: now
+    },
+    relics: [relic],
+    assets
+  };
+}
 
 async function createBundle(status: "summoned" | "claimed", submittedUrl: string) {
   const now = new Date().toISOString();
@@ -627,7 +1175,9 @@ async function createBundle(status: "summoned" | "claimed", submittedUrl: string
       relics: relics.map((relic) => ({
         name: relic.name,
         archetype: relic.archetype,
-        role_in_triptych: `relic ${relic.relicIndex || 1} role`,
+        universal_slot: "WEAR",
+        story_role: `relic ${relic.relicIndex || 1} role`,
+        role_in_triptych: `WEAR / relic ${relic.relicIndex || 1} role`,
         physical_archetype: "garment",
         product_family: relic.productFamily,
         description: relic.description,

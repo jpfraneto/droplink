@@ -18,10 +18,10 @@ function amountAtLeast(actual: string, expected: string) {
   return Number(actual) >= Number(expected);
 }
 
-export async function verifyX402Payment(request: Request): Promise<VerifiedX402Payment> {
+export async function verifyX402Payment(request: Request, paymentProof?: string | null): Promise<VerifiedX402Payment> {
   const readiness = x402Readiness();
   if (!readiness.ready) throw new Error(`x402 scouting payment is not configured: missing ${readiness.missing.join(", ")}.`);
-  const paymentHeader = request.headers.get("x-payment") || request.headers.get("x402-payment") || request.headers.get("payment");
+  const paymentHeader = paymentProof || request.headers.get("x-payment") || request.headers.get("x402-payment") || request.headers.get("payment");
   if (!paymentHeader) throw new Error("x402 payment proof is required before a new DropLink can be scouted.");
   const response = await fetch(`${x402Config.facilitatorUrl.replace(/\/$/, "")}/verify`, {
     method: "POST",

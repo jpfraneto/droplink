@@ -46,6 +46,7 @@ type PrintfulRequestOptions = {
   traceId?: string | null;
   requestId?: string | null;
   operation: string;
+  returnNullOn404?: boolean;
 };
 
 const CATALOG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -110,7 +111,7 @@ export function printfulConfigured(): boolean {
 }
 
 export function printfulConfirmOrders(): boolean {
-  return process.env.PRINTFUL_CONFIRM_ORDERS === "true";
+  return process.env.PRINTFUL_CONFIRM_ORDERS === "true" && process.env.PRINTFUL_AUTO_CONFIRM_ORDERS === "true";
 }
 
 export function assertFulfillmentReady() {
@@ -137,7 +138,9 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function printfulRequest<T = PrintfulJson>(path: string, options: PrintfulRequestOptions): Promise<T> {
+async function printfulRequest<T = PrintfulJson>(path: string, options: PrintfulRequestOptions & { returnNullOn404: true }): Promise<T | null>;
+async function printfulRequest<T = PrintfulJson>(path: string, options: PrintfulRequestOptions): Promise<T>;
+async function printfulRequest<T = PrintfulJson>(path: string, options: PrintfulRequestOptions): Promise<T | null> {
   if (!process.env.PRINTFUL_API_KEY) throw new Error("PRINTFUL_API_KEY is required.");
   return loggedExternalCall(
     {
@@ -158,6 +161,7 @@ async function printfulRequest<T = PrintfulJson>(path: string, options: Printful
         body: options.body ? JSON.stringify(options.body) : undefined
       });
       const json = (await response.json().catch(() => ({}))) as T;
+      if (response.status === 404 && options.returnNullOn404) return null;
       if (response.status === 429) {
         const retryAfter = Number(response.headers.get("retry-after") || 3);
         await sleep(Math.min(Math.max(retryAfter, 3), 15) * 1000);
@@ -171,6 +175,7 @@ async function printfulRequest<T = PrintfulJson>(path: string, options: Printful
           body: options.body ? JSON.stringify(options.body) : undefined
         });
         const retryJson = (await retry.json().catch(() => ({}))) as T;
+        if (retry.status === 404 && options.returnNullOn404) return null;
         if (!retry.ok) {
           throw new Error(`Printful ${options.operation} failed with ${retry.status}: ${redactPrintfulError(retryJson)}`);
         }
@@ -182,6 +187,46 @@ async function printfulRequest<T = PrintfulJson>(path: string, options: Printful
       return json;
     }
   );
+}
+
+function printfulOrderFromJson(json: PrintfulJson | null): PrintfulOrderReference | null {
+  const data = (json?.data || {}) as PrintfulJson;
+  const id = data.id == null ? "" : String(data.id);
+  if (!id) return null;
+  const externalId = data.external_id == null ? null : String(data.external_id);
+  const status = data.status == null ? null : String(data.status);
+  return {
+    providerOrderId: id,
+    providerExternalId: externalId,
+    status,
+    responseJson: json || {},
+    costsJson: ((data.costs || data.retail_costs || null) as Record<string, unknown> | null) || null
+  };
+}
+
+export type PrintfulOrderReference = {
+  providerOrderId: string;
+  providerExternalId?: string | null;
+  status?: string | null;
+  responseJson: PrintfulJson;
+  costsJson?: Record<string, unknown> | null;
+};
+
+export async function findPrintfulOrderByExternalId(input: {
+  externalId: string;
+  traceId?: string | null;
+  requestId?: string | null;
+}): Promise<PrintfulOrderReference | null> {
+  if (!printfulConfigured() && allowMocks()) return null;
+  assertFulfillmentReady();
+  const lookupId = `@${encodeURIComponent(input.externalId)}`;
+  const response = await printfulRequest<PrintfulJson>(`/v2/orders/${lookupId}`, {
+    operation: "orders.retrieve_by_external_id",
+    traceId: input.traceId,
+    requestId: input.requestId,
+    returnNullOn404: true
+  });
+  return printfulOrderFromJson(response);
 }
 
 async function getCachedJson(cacheKey: string): Promise<unknown | null> {
@@ -339,16 +384,35 @@ async function listMockupStyles(
     .filter(Boolean) as Array<{ id: number; name: string; viewName: string; raw: PrintfulJson }>;
 }
 
+function selectionText(input: FulfillmentSelectionInput) {
+  return `${input.physicalArchetype || ""} ${input.productFamily} ${input.archetype} ${input.name} ${input.description}`.toLowerCase();
+}
+
 function targetTerms(input: FulfillmentSelectionInput): string[] {
-  const combined = `${input.physicalArchetype || ""} ${input.productFamily} ${input.archetype} ${input.name} ${input.description}`.toLowerCase();
+  const combined = selectionText(input);
   if (/hoodie|sweatshirt/.test(combined)) return ["hoodie", "sweatshirt", "fleece"];
   if (/hat|cap/.test(combined)) return ["hat", "cap"];
   if (/sticker/.test(combined)) return ["sticker"];
-  if (/tote|carry/.test(combined)) return ["tote", "bag"];
-  if (/poster|print|wall|shrine/.test(combined)) return ["poster", "print"];
-  if (/mug|drink/.test(combined)) return ["mug"];
-  if (/shirt|tee|garment|body/.test(combined)) return ["shirt", "tee", "t-shirt"];
+  if (/tote|carry|bag/.test(combined)) return ["tote", "bag"];
+  if (/poster|postcard|print|wall|shrine|display/.test(combined)) return ["poster", "print", "canvas"];
+  if (/mug|drink|bottle|tumbler/.test(combined)) return ["mug", "bottle", "tumbler"];
+  if (/notebook|journal/.test(combined)) return ["notebook", "journal"];
+  if (/laptop|sleeve|case/.test(combined)) return ["case", "sleeve"];
+  if (/shirt|tee|garment|body|wear/.test(combined)) return ["shirt", "tee", "t-shirt"];
   return ["shirt", "tee", "poster", "tote"];
+}
+
+function allowedProductCategories(input: FulfillmentSelectionInput): string[] {
+  const combined = selectionText(input);
+  if (/\bdisplay\b|poster|postcard|print|wall|shrine|canvas/.test(combined)) return ["poster", "sticker"];
+  if (/\buse\b|tote|carry|bag|mug|drink|bottle|tumbler|notebook|journal|laptop|sleeve|case/.test(combined)) {
+    return ["tote", "drinkware", "notebook", "case"];
+  }
+  if (/\bwear\b|shirt|tee|hoodie|sweatshirt|hat|cap|garment|body/.test(combined)) return ["tee", "hoodie", "hat"];
+  if (input.physicalArchetype === "poster" || input.physicalArchetype === "print" || input.physicalArchetype === "sticker") return ["poster", "sticker"];
+  if (input.physicalArchetype === "tote" || input.physicalArchetype === "other") return ["tote", "drinkware", "notebook", "case", "poster"];
+  if (input.physicalArchetype === "garment" || input.physicalArchetype === "hat") return ["tee", "hoodie", "hat"];
+  return [];
 }
 
 function scoreProduct(product: CatalogProduct, terms: string[], avoidProductCategories: string[] = []) {
@@ -433,8 +497,13 @@ export function buildRelicFulfillmentSpec(input: {
 export async function selectPrintfulCatalogVariant(input: FulfillmentSelectionInput): Promise<SelectedPrintfulVariant> {
   assertFulfillmentReady();
   const terms = targetTerms(input);
+  const allowedCategories = allowedProductCategories(input);
   const products = await listCatalogProducts(input);
-  const topProducts = products
+  const categoryFiltered = allowedCategories.length
+    ? products.filter((product) => allowedCategories.includes(productCategory(product)))
+    : products;
+  const candidateProducts = categoryFiltered.length ? categoryFiltered : products;
+  const topProducts = candidateProducts
     .map((product) => ({ product, score: scoreProduct(product, terms, input.avoidProductCategories || []) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, 10);
@@ -705,23 +774,23 @@ export async function createPrintfulDraftOrder(input: {
       }
     },
     async () => {
-      const orderResponse = await printfulRequest<PrintfulJson>("/v2/orders", {
+      const orderResponse = (await printfulRequest<PrintfulJson>("/v2/orders", {
         method: "POST",
         operation: "orders.create",
         body: requestJson.order,
         traceId: input.traceId,
         requestId: input.requestId
-      });
+      })) as PrintfulJson;
       const printfulOrder = (orderResponse.data || {}) as PrintfulJson;
       const providerOrderId = String(printfulOrder.id || printfulOrder.external_id || "");
       if (!providerOrderId) throw new Error("Printful did not return an order id.");
-      const itemResponse = await printfulRequest<PrintfulJson>(`/v2/orders/${encodeURIComponent(providerOrderId)}/order-items`, {
+      const itemResponse = (await printfulRequest<PrintfulJson>(`/v2/orders/${encodeURIComponent(providerOrderId)}/order-items`, {
         method: "POST",
         operation: "orders.order_items.create",
         body: requestJson.orderItem,
         traceId: input.traceId,
         requestId: input.requestId
-      });
+      })) as PrintfulJson;
       return {
         providerOrderId,
         providerExternalId: input.orderId,
@@ -737,22 +806,26 @@ export async function createPrintfulDraftOrder(input: {
 
 export async function confirmPrintfulOrder(input: {
   providerOrderId: string;
+  force?: boolean;
   traceId?: string | null;
   requestId?: string | null;
 }) {
   if (!printfulConfirmOrders()) {
-    return { status: "draft_created" as const, responseJson: { skipped: true, reason: "PRINTFUL_CONFIRM_ORDERS is not true" } };
+    return {
+      status: "draft_created" as const,
+      responseJson: { skipped: true, reason: "PRINTFUL_CONFIRM_ORDERS and PRINTFUL_AUTO_CONFIRM_ORDERS are not both true" }
+    };
   }
   assertFulfillmentReady();
   return loggedExternalCall(
     { provider: "printful", operation: "orders.confirm", traceId: input.traceId, requestId: input.requestId },
     async () => {
-      const responseJson = await printfulRequest<PrintfulJson>(`/v2/orders/${encodeURIComponent(input.providerOrderId)}/confirmation`, {
+      const responseJson = (await printfulRequest<PrintfulJson>(`/v2/orders/${encodeURIComponent(input.providerOrderId)}/confirmation`, {
         method: "POST",
         operation: "orders.confirm",
         traceId: input.traceId,
         requestId: input.requestId
-      });
+      })) as PrintfulJson;
       return { status: "confirmed" as const, responseJson };
     }
   );

@@ -64,6 +64,30 @@ export const pricingConfig = {
   }
 };
 
+export const checkoutConfig = {
+  get globallyPaused() {
+    return boolEnv("DROPLINK_CHECKOUT_PAUSED", false);
+  },
+  get allowedCountries() {
+    const raw = process.env.DROPLINK_CHECKOUT_ALLOWED_COUNTRIES || "US";
+    return raw
+      .split(",")
+      .map((entry) => entry.trim().toUpperCase())
+      .filter(Boolean);
+  },
+  get shippingMode() {
+    const raw = process.env.DROPLINK_SHIPPING_MODE || "included";
+    if (raw !== "included" && raw !== "fixed") throw new Error("DROPLINK_SHIPPING_MODE must be included or fixed.");
+    return raw;
+  },
+  get fixedShippingAmountCents() {
+    return numberEnv("DROPLINK_FIXED_SHIPPING_AMOUNT_CENTS", 0);
+  },
+  get stripeTaxEnabled() {
+    return boolEnv("DROPLINK_STRIPE_TAX_ENABLED", false);
+  }
+};
+
 export const x402Config = {
   get enabled() {
     return boolEnv("X402_ENABLED", false);
@@ -75,7 +99,7 @@ export const x402Config = {
     return process.env.X402_ACCEPTED_ASSET || "USDC";
   },
   get recipientAddress() {
-    return process.env.X402_RECIPIENT_ADDRESS || process.env.DROPLINK_TREASURY_ADDRESS || "";
+    return process.env.X402_RECIPIENT_ADDRESS || process.env.DROPLINK_TREASURY_ADDRESS || "0x3D45a97C4f76D43e810Ff107cB6dad3e5AF64641";
   },
   get facilitatorUrl() {
     return process.env.X402_FACILITATOR_URL || "";
@@ -116,7 +140,7 @@ export function checkEnv(required: string[]): ConfigCheck {
 
 export function x402Readiness(): ConfigCheck {
   if (!x402Config.enabled) return { ready: false, missing: ["X402_ENABLED=true"] };
-  return checkEnv(["DROPLINK_SUMMON_PRICE_USDC", "X402_NETWORK", "X402_ACCEPTED_ASSET", "X402_RECIPIENT_ADDRESS", "X402_FACILITATOR_URL"]);
+  return checkEnv(["DROPLINK_SUMMON_PRICE_USDC", "X402_NETWORK", "X402_ACCEPTED_ASSET", "X402_FACILITATOR_URL"]);
 }
 
 export function tempoReadiness(): ConfigCheck {
